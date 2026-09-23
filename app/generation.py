@@ -1,0 +1,554 @@
+"""Prompt construction, LLM calls, identifier grounding, fabrication safety
+nets, multi-question splitting, and the ClarificationNeeded response shape.
+"""
+from __future__ import annotations
+
+import re
+import traceback
+from dataclasses import dataclass, field
+from typing import Optional, Union
+
+import requests
+
+from app import config, database, retrieval
+
+REFUSAL_PHRASES = [
+    # Indonesian
+    "tidak ditemukan", "tidak tersedia", "tidak dapat menemukan",
+    "maaf, saya tidak", "tidak ada informasi", "di luar cakupan",
+    "tidak disebutkan dalam dokumen",
+    # English (known-bug #6: evaluator must recognize both languages)
+    "cannot find", "not available in the document", "no information",
+    "i cannot answer", "not mentioned in the document", "out of scope",
+    "i don't have that information",
+]
+
+HEDGING_PHRASES = [
+    "mungkin", "kemungkinan", "sepertinya", "perlu diverifikasi",
+    "possibly", "it seems", "may be", "not certain", "unclear",
+]
+
+
+@dataclass
+class ClarificationNeeded:
+    message: str
+    candidates: list[str] = field(default_factory=list)
+
+
+@dataclass
+class Answer:
+    text: str
+    sources: list[str] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Prompt construction
+# ---------------------------------------------------------------------------
+
+_SYSTEM_PROMPT = """Anda adalah asisten STK Online untuk dokumen kontrak dan SOP internal Pertamina PDSI.
+Jawab HANYA berdasarkan konteks yang diberikan di bawah ini. Jangan mengarang informasi.
+Jika jawabannya tidak ada dalam konteks, katakan dengan jelas bahwa informasi tersebut tidak ditemukan dalam dokumen.
+Jika beberapa sumber memberikan nilai yang berbeda untuk fakta yang tampaknya sama, sebutkan nilai dari masing-masing
+sumber secara terpisah (misalnya "Menurut Dokumen A ... sedangkan menurut Dokumen B ..."), jangan menggabungkannya
+menjadi satu jawaban yang kontradiktif.
+
+Pilih format jawaban sesuai bentuk isinya, jangan dipaksakan satu bentuk untuk semua kasus:
+- Jika jawabannya satu fakta sederhana, tulis sebagai satu paragraf singkat yang mengalir, seperti menjelaskan
+  langsung ke rekan kerja.
+- Jika isinya memang terdiri dari beberapa bagian yang berbeda (misalnya beberapa tahap/stage, beberapa
+  langkah, atau beberapa sub-item dengan nilai masing-masing), tulis satu baris singkat per bagian dengan
+  label tebal (**Label** -- penjelasan singkat), bukan dipaksakan jadi satu paragraf panjang.
+Jangan menyalin ulang kalimat konteks kata per kata atau mengulang frasa templat yang sama untuk setiap
+ayat/sub-bagian. Sebutkan angka, tanggal, dan kode referensi persis apa adanya (jangan diubah nilainya)."""
+
+
+_SHORT_DISCLAIMER = "Dihasilkan otomatis -- verifikasi ulang untuk hal penting."
+
+
+def _build_footer(notes: list[str]) -> str:
+    """Caveats and the disclaimer, visually separated from the answer by a
+    markdown divider and kept short -- previously appended as bracketed
+    sentences stitched directly onto the answer's own prose, which read
+    as clutter rather than a distinct, skimmable caveat."""
+    return "\n\n---\n" + "\n".join(notes + [_SHORT_DISCLAIMER])
+
+
+def build_prompt(question: str, hits: list[dict]) -> str:
+    context_blocks = []
+    for h in hits:
+        context_blocks.append(f"[Sumber: {h['source']}, Halaman {h['page']}]\n{h['text']}")
+    context = "\n\n".join(context_blocks) if context_blocks else "(tidak ada konteks yang relevan)"
+    return (
+        f"{_SYSTEM_PROMPT}\n\n"
+        f"KONTEKS:\n{context}\n\n"
+        f"PERTANYAAN: {question}\n\n"
+        f"JAWABAN:"
+    )
+
+
+def build_full_document_prompt(question: str, source: str, full_text: str) -> str:
+    """Used by the full-document fallback: the whole document in one block
+    instead of retrieved chunks, for a broad/enumerate-style question about
+    one small named document -- guarantees completeness regardless of
+    chunk-level retrieval quality, since there's no top-k to drop anything
+    from."""
+    return (
+        f"{_SYSTEM_PROMPT}\n\n"
+        f"DOKUMEN LENGKAP ({source}):\n{full_text}\n\n"
+        f"PERTANYAAN: {question}\n\n"
+        f"JAWABAN:"
+    )
+
+
+def _fits_in_context(text: str) -> bool:
+    budget_tokens = config.OLLAMA_CONTEXT_TOKENS - config.FULL_DOC_PROMPT_MARGIN_TOKENS
+    estimated_tokens = len(text) // config.CHARS_PER_TOKEN_ESTIMATE
+    return estimated_tokens <= budget_tokens
+
+
+def call_ollama(prompt: str, _retried: bool = False) -> tuple[str, Optional[int], Optional[int]]:
+    """Returns (response_text, prompt_tokens, response_tokens). Ollama's
+    payload carries these as prompt_eval_count/eval_count on every call --
+    previously read only for the response text and the counts discarded,
+    so per-session usage was invisible without digging through Ollama's own
+    logs. Token counts are the RAG app's own runtime LLM cost, a separate
+    concept from Claude Code's development-time usage building this app."""
+    try:
+        resp = requests.post(
+            f"{config.OLLAMA_HOST}/api/generate",
+            json={"model": config.OLLAMA_MODEL, "prompt": prompt, "stream": False},
+            timeout=config.OLLAMA_TIMEOUT_SECONDS,
+        )
+        resp.raise_for_status()
+    except requests.exceptions.HTTPError:
+        # On this 8GB-RAM laptop, Ollama unloads the idle model and an
+        # occasional first request after reload transiently 500s while it
+        # reloads under memory pressure. One retry clears it; a second
+        # failure is a real error and should propagate.
+        if _retried:
+            raise
+        return call_ollama(prompt, _retried=True)
+    payload = resp.json()
+    return (
+        payload.get("response", "").strip(),
+        payload.get("prompt_eval_count"),
+        payload.get("eval_count"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Identifier grounding (known-bug #8: pattern must accept letters, not just
+# digits -- and, per the audit that found this still hardcoded to
+# Pasal/Lampiran/Bab, must not assume which keyword a document type uses
+# for its identifiers. "Ayat" was already missing from this list, and any
+# future document type coining its own identifier word would have been
+# invisible to fabrication-checking. Mirrors retrieval.py's
+# _IDENTIFIER_EXTRACT_RE: any capitalized word/phrase + alphanumeric token,
+# no fixed vocabulary.)
+# ---------------------------------------------------------------------------
+
+# [ \t] (not \s) between phrase words and before the number: a real
+# section identifier is always written on one line -- \s would also match
+# a newline, so a numbered list the LLM writes in its own answer ("...
+# Akhmad Karmila\n2. Perihal: ...") reads as one fabricated "phrase +
+# number" pair spanning the list marker's line break, not an actual
+# document reference (confirmed live). Same phrase used in retrieval.py's
+# _IDENTIFIER_EXTRACT_RE should mirror this if it's ever seen doing the
+# same thing against multi-line text.
+_IDENTIFIER_PATTERN = re.compile(
+    r"\b([A-Z][a-zA-Z]*(?:[ \t-]+[A-Z][a-zA-Z]*)*)[ \t]+([A-Za-z]?\d+(?:[.\-]\d+)?)\b"
+)
+
+
+_BARE_IDENTIFIER_RE = re.compile(r"^[A-Za-z]?\d+(?:[.\-]\d+)?$")
+
+
+def heading_lead_words(headings: list[dict]) -> set[str]:
+    """Vocabulary built dynamically per-call from the retrieved sources'
+    real headings -- never a fixed hardcoded vocabulary. Keyed on the
+    identifier's number/code alone, not the "word number" pair: a contract
+    ayat marker is drawn as its own short bold line ("1.2") with no "Ayat"
+    or "Pasal" prefix in the text detect_headings() actually stores, so
+    matching on the full pair produced false positives -- a genuine "Ayat
+    1.2" reference in an answer got flagged as unverified purely because
+    the stored heading text never spells out which word it belongs to.
+    The number is still specific enough within one document to catch real
+    fabrications (e.g. "Pasal 99" when the highest real Pasal is 25)."""
+    vocab = set()
+    for h in headings:
+        text = h["text"].strip()
+        for match in _IDENTIFIER_PATTERN.finditer(text):
+            vocab.add(match.group(2).lower())
+        if _BARE_IDENTIFIER_RE.match(text):
+            vocab.add(text.lower())
+    return vocab
+
+
+# A fully generic "CapitalizedWord + number" pattern also matches ordinary
+# value phrases, not just section identifiers -- e.g. a bulleted answer
+# like "- Ayat 21.4: Sebesar 74 juta rupiah" makes "Sebesar 74" look like a
+# candidate identifier purely because "Sebesar" is capitalized as the first
+# word after the colon. This isn't the same trap as hardcoding a corpus's
+# document-type words (part 1) or section-keyword words (identifier
+# vocabulary above): Indonesian/English measurement and currency units are
+# a closed, stable part of the language itself, not something that varies
+# by document type or corpus, so filtering on "the number is immediately
+# followed by a unit word" is a linguistic fact, not a naming-convention
+# guess that could go stale.
+_VALUE_UNIT_RE = re.compile(
+    r"^\s*(juta|ribu|miliar|persen|%|rupiah|hari|bulan|tahun|menit|jam|kali)\b",
+    re.IGNORECASE,
+)
+
+# A calendar date ("1 November 2024", "September 2025") makes the generic
+# "CapitalizedWord + number" pattern look like a section identifier purely
+# because a month name is capitalized and immediately precedes a year --
+# confirmed live: "berlaku mulai tanggal 1 November 2024" got flagged as an
+# unverified identifier. Same category of fix as the value-unit filter
+# above: Indonesian/English month names are a closed, stable part of the
+# language, not corpus-specific vocabulary that could go stale.
+_MONTH_NAMES = {
+    "januari", "februari", "maret", "april", "mei", "juni", "juli", "agustus",
+    "september", "oktober", "november", "desember",
+    "january", "february", "march", "june", "july", "august", "october", "december",
+}
+
+
+def unverified_identifiers(answer_text: str, headings: list[dict]) -> list[str]:
+    vocab = heading_lead_words(headings)
+    unverified = []
+    for match in _IDENTIFIER_PATTERN.finditer(answer_text):
+        if _VALUE_UNIT_RE.match(answer_text[match.end():match.end() + 20]):
+            continue
+        if match.group(1).strip().lower() in _MONTH_NAMES:
+            continue
+        if match.group(2).lower() not in vocab:
+            unverified.append(match.group(0))
+    return unverified
+
+
+# ---------------------------------------------------------------------------
+# Multi-question splitting
+# ---------------------------------------------------------------------------
+
+_META_REQUEST_PATTERNS = [
+    # the leading connector ("tolong"/"please") is consumed together with
+    # the instruction phrase -- stripping only the phrase and leaving the
+    # connector behind created an orphan fragment ("Tolong .") that then
+    # got treated as its own phantom sub-question (found via live testing
+    # of "... dan apa isi Lampiran A ...? Tolong jawab singkat.").
+    re.compile(
+        r"\b(?:tolong|please)\s+(?:jawab\s+singkat|be\s+brief|be\s+detailed|detail(?:kan)?|jelaskan\s+secara\s+detail)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b(?:jawab\s+singkat|be\s+brief|be\s+detailed|jelaskan\s+secara\s+detail)\b", re.IGNORECASE),
+]
+
+_FOLLOWUP_PATTERNS = [
+    re.compile(r"^\s*(why\?|kenapa\?|mengapa\?)\s*$", re.IGNORECASE),
+]
+
+
+_QUESTION_WORD = (
+    r"(?:apa|berapa|siapa|kapan|dimana|di\s+mana|bagaimana|mengapa|kenapa|"
+    r"what|how|when|where|why|who|which)"
+)
+
+
+def split_questions(text: str) -> list[str]:
+    """Splits a combined message into sub-questions. Handles conjunctions,
+    trailing meta-instructions, and short context-dependent follow-ups.
+    A sub-question must never be silently dropped."""
+    text = text.strip()
+    if not text:
+        return []
+
+    # strip trailing meta-instructions but keep them noted (not answered as Q)
+    for pattern in _META_REQUEST_PATTERNS:
+        text = pattern.sub("", text).strip()
+
+    # Split on: a "?" followed by a conjunction, a bare "?", or a
+    # conjunction immediately followed by a question word even with no
+    # preceding "?" ("...di Kontrak_Sewa_100.pdf dan apa isi Lampiran A...").
+    # That last case was a real gap found in testing: a compound question
+    # with only one trailing "?" got sent through generate_answer() as one
+    # combined question -- it happened to answer both facts because a
+    # single retrieval call covered both, but nothing guaranteed that, and
+    # a genuine drop wouldn't have been visible. The question-word lookahead
+    # keeps this from over-splitting an ordinary single question like
+    # "Pasal 2 dan Pasal 3" that just happens to contain "dan".
+    raw_parts = re.split(
+        rf"(?<=[?])\s+(?:dan|and)\s+|(?<=[?])\s+|\s+(?:dan|and)\s+(?={_QUESTION_WORD}\b)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    parts = [p.strip() for p in raw_parts if p.strip()]
+
+    if not parts:
+        parts = [text]
+
+    # if a part has no "?" and isn't a short follow-up, still keep it as its
+    # own item rather than silently dropping it -- but a fragment left over
+    # from meta-instruction stripping that's pure punctuation ("." with
+    # nothing else) isn't a real sub-question and would just get sent to
+    # generate_answer() as noise, so drop only that specific case.
+    final: list[str] = []
+    for p in parts:
+        if p and not re.fullmatch(r"[.!?,\s]*", p):
+            final.append(p)
+    return final
+
+
+def is_followup_only(question: str) -> bool:
+    return any(p.match(question) for p in _FOLLOWUP_PATTERNS)
+
+
+# ---------------------------------------------------------------------------
+# Refusal / hedging detection
+# ---------------------------------------------------------------------------
+
+def looks_like_refusal(answer: str) -> bool:
+    lower = answer.lower()
+    return any(phrase in lower for phrase in REFUSAL_PHRASES)
+
+
+def looks_like_hedging(answer: str) -> bool:
+    lower = answer.lower()
+    return any(phrase in lower for phrase in HEDGING_PHRASES)
+
+
+# ---------------------------------------------------------------------------
+# Single-question orchestration
+# ---------------------------------------------------------------------------
+
+def generate_answer(
+    question: str, session_id: Optional[str] = None, _forced_source: Optional[str] = None
+) -> Union[Answer, ClarificationNeeded]:
+    named_sources = [_forced_source] if _forced_source else retrieval.named_target_sources(question)
+
+    # Multi-source discovery: this is a "find the file" system over a
+    # corpus of unrelated real documents, not one document at a time -- a
+    # question with no document named must never silently blend content
+    # from several unrelated files into one paragraph (confirmed live: "ada
+    # berapa bab?" with nothing named merged headings from a risk-management
+    # doc and an unrelated SOP into one nonsense list). Look at how many
+    # DISTINCT documents actually compete for the top retrieval slots and
+    # branch: none -> not found; one -> just answer it, scoped to that one
+    # automatically; a few -> answer each in full, clearly labeled by file,
+    # never merged; too many to write out in full -> a short labeled
+    # candidate list instead (cheap, no LLM call) and let the next message
+    # naming one of them (typed, or the existing candidate-button flow)
+    # come back through here with _forced_source set.
+    if not named_sources:
+        wide_hits = retrieval.retrieve(question, source_filter=None, k=config.MULTI_SOURCE_CANDIDATE_K)
+        best_per_source: dict[str, dict] = {}
+        for h in wide_hits:
+            src = h["source"]
+            if src not in best_per_source or h["score"] > best_per_source[src]["score"]:
+                best_per_source[src] = h
+        ranked_sources = sorted(best_per_source.items(), key=lambda kv: kv[1]["score"], reverse=True)
+
+        if not ranked_sources:
+            answer = "Maaf, informasi tersebut tidak ditemukan dalam dokumen yang tersedia."
+            database.log_answer(session_id, question, answer, 0.0, False, True, False, [])
+            return Answer(text=answer, sources=[])
+
+        if len(ranked_sources) == 1:
+            return generate_answer(question, session_id=session_id, _forced_source=ranked_sources[0][0])
+
+        if len(ranked_sources) <= config.MULTI_SOURCE_MAX_FILES:
+            blocks = []
+            all_sources = []
+            for src, _ in ranked_sources:
+                sub = generate_answer(question, session_id=session_id, _forced_source=src)
+                sub_text = sub.message if isinstance(sub, ClarificationNeeded) else sub.text
+                blocks.append(f"Berdasarkan {src}:\n{sub_text}")
+                all_sources.append(src)
+            combined = "\n\n".join(blocks)
+            combined += "\n\nJika Anda ingin fokus ke satu dokumen tertentu, sebutkan nama dokumennya."
+            return Answer(text=combined, sources=all_sources)
+
+        top = ranked_sources[: config.MULTI_SOURCE_CANDIDATE_LIST_MAX]
+        lines = []
+        for src, hit in top:
+            snippet = " ".join(hit["text"].split())[:100]
+            lines.append(f"- {src} -- \"{snippet}...\" (hal. {hit['page']})")
+        message = (
+            f"Ditemukan kecocokan di {len(ranked_sources)} dokumen -- terlalu banyak untuk ditampilkan "
+            f"lengkap sekaligus:\n" + "\n".join(lines) +
+            "\n\nSebutkan nama dokumen untuk jawaban lengkap."
+        )
+        candidates = [src for src, _ in top]
+        database.log_answer(session_id, question, message, None, False, False, True, wide_hits)
+        return ClarificationNeeded(message=message, candidates=candidates)
+
+    # Enumerate-intent routing: a "list all X" / "apa saja X" / "berapa
+    # banyak X" question must never go through similarity retrieval, which
+    # returns the most-relevant top-k, not a completeness guarantee (see
+    # module docstring -- "list all Pasal" through the normal path returned
+    # 4 of 22 real headings). Both deterministic paths read the real
+    # heading/document index directly and format with zero LLM calls, so
+    # the count can't be dropped by retrieval depth or invented by the model.
+    broad = retrieval.broad_category_listing(question, named_sources)
+    if broad is not None:
+        lines = "\n".join(f"- {h}" for h in broad["headings"])
+        answer = (
+            f"Ditemukan {len(broad['headings'])} bagian '{broad['category']}':\n{lines}"
+        )
+        database.log_answer(session_id, question, answer, None, False, False, False, [])
+        return Answer(text=answer, sources=broad["sources"])
+
+    doc_listing = retrieval.document_type_listing(question, named_sources)
+    if doc_listing is not None:
+        lines = "\n".join(f"- {s}" for s in doc_listing["sources"])
+        answer = (
+            f"Ditemukan {len(doc_listing['sources'])} dokumen bertipe "
+            f"'{doc_listing['doc_type']}':\n{lines}"
+        )
+        database.log_answer(session_id, question, answer, None, False, False, False, [])
+        return Answer(text=answer, sources=doc_listing["sources"])
+
+    # Full-document fallback: a broad question (no specific clause/section
+    # identifier referenced) about exactly one small named document skips
+    # retrieval and gets the whole document injected instead -- guarantees
+    # completeness regardless of chunk-level retrieval quality. Only when
+    # the estimated size clearly fits this model's actual running context
+    # window (4096 tokens, not qwen2.5's larger architecture max) with real
+    # margin for the prompt template and response; otherwise falls through
+    # to the normal retrieval path rather than silently truncating.
+    if len(named_sources) == 1 and not _IDENTIFIER_PATTERN.search(question):
+        full_text = retrieval.get_full_document_text(named_sources[0])
+        if full_text and _fits_in_context(full_text):
+            prompt = build_full_document_prompt(question, named_sources[0], full_text)
+            answer, prompt_tokens, response_tokens = call_ollama(prompt)
+            answer += _build_footer(["Dihasilkan dari keseluruhan isi dokumen, bukan potongan teks."])
+            database.log_answer(
+                session_id, question, answer, None, looks_like_hedging(answer),
+                looks_like_refusal(answer), False, [],
+                prompt_tokens=prompt_tokens, response_tokens=response_tokens,
+            )
+            return Answer(text=answer, sources=[named_sources[0]])
+
+    source_filter = named_sources or None
+    hits = retrieval.retrieve(question, source_filter=source_filter, k=config.TOP_K)
+
+    ambiguity = retrieval.detect_ambiguity(question, hits, named_sources)
+    if ambiguity is not None:
+        message = (
+            "Pertanyaan Anda merujuk pada identifikasi yang ditemukan di beberapa dokumen: "
+            + ", ".join(ambiguity.candidates)
+            + ". Mohon sebutkan dokumen yang dimaksud."
+        )
+        clarification = ClarificationNeeded(message=message, candidates=ambiguity.candidates)
+        database.log_answer(session_id, question, message, None, False, False, True, hits)
+        return clarification
+
+    if not hits:
+        answer = "Maaf, informasi tersebut tidak ditemukan dalam dokumen yang tersedia."
+        database.log_answer(session_id, question, answer, 0.0, False, True, False, [])
+        return Answer(text=answer, sources=named_sources)
+
+    prompt = build_prompt(question, hits)
+    answer, prompt_tokens, response_tokens = call_ollama(prompt)
+
+    relevant_sources = list({h["source"] for h in hits})
+    headings = retrieval.get_headings_for(relevant_sources)
+    unverified = unverified_identifiers(answer, headings)
+    footer_notes = []
+    if unverified:
+        footer_notes.append(
+            f"Catatan: {', '.join(unverified)} belum terverifikasi terhadap dokumen sumber."
+        )
+
+    avg_score = sum(h["score"] for h in hits) / len(hits)
+
+    ocr_confidences = [h["ocr_confidence"] for h in hits if h.get("ocr_confidence") is not None]
+    avg_ocr_confidence = sum(ocr_confidences) / len(ocr_confidences) if ocr_confidences else None
+    if avg_ocr_confidence is not None and avg_ocr_confidence < database.LOW_OCR_CONFIDENCE_THRESHOLD:
+        footer_notes.append(
+            f"Catatan: sebagian konteks berasal dari hasil pemindaian (OCR) dengan keyakinan rendah "
+            f"(~{avg_ocr_confidence:.0f}/100)."
+        )
+
+    answer += _build_footer(footer_notes)
+    refused = looks_like_refusal(answer)
+    hedged = looks_like_hedging(answer)
+
+    database.log_answer(
+        session_id, question, answer, avg_score, hedged, refused, False, hits,
+        avg_ocr_confidence=avg_ocr_confidence,
+        prompt_tokens=prompt_tokens, response_tokens=response_tokens,
+    )
+
+    return Answer(text=answer, sources=relevant_sources)
+
+
+_RESUME_WITH_DOCUMENT_RE = re.compile(r"^(.*?)\s+untuk dokumen\s+(\S.*)$", re.IGNORECASE | re.DOTALL)
+
+
+def generate_multi_answer(text: str, session_id: Optional[str] = None) -> list[dict]:
+    """Runs each sub-question through generate_answer(). Every sub-question
+    appears in the output, explicitly, even if it couldn't be answered --
+    never silently dropped.
+
+    A resumed clarification ("<original question> untuk dokumen <file>",
+    composed by the UI's candidate buttons or typed by an API caller
+    resolving a multi-source candidate list) must be treated as ONE
+    question with a forced source, never run through split_questions() --
+    the original question almost always ends in "?", which split_questions()
+    reads as a sentence boundary and splits the document name off into its
+    own meaningless fragment, so the forced-source connection is lost and
+    the LLM ends up answering neither part correctly (confirmed live: this
+    silently degraded into a generic "what is this document about" answer
+    instead of resuming the actual original question)."""
+    stripped = text.strip()
+    resume_match = _RESUME_WITH_DOCUMENT_RE.match(stripped)
+    if resume_match and resume_match.group(2).strip() in retrieval.list_indexed_sources():
+        sub_questions = [(resume_match.group(1).strip(), resume_match.group(2).strip())]
+    else:
+        sub_questions = [(q, None) for q in split_questions(text)]
+
+    results = []
+    for q, forced_source in sub_questions:
+        try:
+            result = generate_answer(q, session_id=session_id, _forced_source=forced_source)
+        except Exception as exc:  # never drop a sub-question, surface the failure
+            traceback.print_exc()  # full trace to stderr; user sees only the short message below
+            results.append(
+                {
+                    "question": q,
+                    "answer": f"[Terjadi kesalahan saat memproses pertanyaan ini: {exc}]",
+                    "answered": False,
+                    "refused": False,
+                    "needs_clarification": False,
+                    "candidate_documents": [],
+                    "sources": [],
+                }
+            )
+            continue
+
+        if isinstance(result, ClarificationNeeded):
+            results.append(
+                {
+                    "question": q,
+                    "answer": result.message,
+                    "answered": False,
+                    "refused": False,
+                    "needs_clarification": True,
+                    "candidate_documents": result.candidates,
+                    "sources": [],
+                }
+            )
+        else:
+            results.append(
+                {
+                    "question": q,
+                    "answer": result.text,
+                    "answered": not looks_like_refusal(result.text),
+                    "refused": looks_like_refusal(result.text),
+                    "needs_clarification": False,
+                    "candidate_documents": [],
+                    "sources": result.sources,
+                }
+            )
+    return results
