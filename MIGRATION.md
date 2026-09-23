@@ -23,21 +23,15 @@
 
 ## New laptop setup, in order
 
-1. **Clone the repo**:
-   ```
-   git clone https://github.com/riflifaizullah/rag_system_stk.git
-   cd rag_system_stk
-   ```
-2. **Python 3.11**, then the venv:
-   ```
-   python -m venv .venv
-   .venv\Scripts\Activate.ps1
-   pip install -r requirements.txt
-   ```
-3. **GPU-enabled torch** — step 2 installs the CPU-only build by default.
-   Check your driver's max CUDA version first (`nvidia-smi`, top-right),
-   then replace torch with a matching CUDA build (Blackwell/RTX 50-series
-   needs a recent build, e.g. `cu128` if your driver supports it):
+1. ~~Clone the repo, `pip install -r requirements.txt`~~ — **already done.**
+   Just make sure you've pulled the latest (`git pull`) so you have the
+   `qwen3.5:9b` config update, not the earlier `qwen2.5:7b-instruct` one.
+2. **GPU-enabled torch** — the plain `pip install -r requirements.txt`
+   installs the CPU-only build by default, so this step is still needed
+   even though requirements are already installed. Check your driver's max
+   CUDA version first (`nvidia-smi`, top-right), then replace torch with a
+   matching CUDA build (Blackwell/RTX 50-series needs a recent build, e.g.
+   `cu128` if your driver supports it):
    ```
    pip uninstall torch torchvision torchaudio -y
    pip install torch --index-url https://download.pytorch.org/whl/cu128
@@ -45,15 +39,15 @@
    ```
    Should print `True` and your GPU's name. The embedder and reranker use
    CUDA automatically once this is true -- no code changes needed.
-4. **Ollama**, then the model:
+3. **Ollama**, then the model:
    ```
-   ollama pull qwen2.5:7b-instruct
+   ollama pull qwen3.5:9b
    ```
-5. **Tesseract OCR** — install the Windows build, include the Indonesian
+4. **Tesseract OCR** — install the Windows build, include the Indonesian
    (`ind`) language pack, set `TESSDATA_PREFIX` to wherever its `tessdata`
    folder ends up.
-6. **Poppler** — install, make sure it's on PATH.
-7. **Get the PDFs into `data/corpus/`** (auto-created the first time any
+5. **Poppler** — install, make sure it's on PATH.
+6. **Get the PDFs into `data/corpus/`** (auto-created the first time any
    app code runs, e.g. `python -c "from app import config"`), then build
    the index:
    ```
@@ -62,18 +56,18 @@
    For ~1000 real files this will take a long time, especially any scanned
    pages -- don't expect the few-minute turnaround this session's 20-file
    corpus had.
-8. Run it: `uvicorn app.api:app --host 0.0.0.0 --port 8000` and
+7. Run it: `uvicorn app.api:app --host 0.0.0.0 --port 8000` and
    `streamlit run streamlit_app.py`.
 
 ## What changed in `config.py` for this hardware (already committed)
 
 | Setting | Old (temp laptop) | New | Why |
 |---|---|---|---|
-| `OLLAMA_MODEL` | `qwen2.5:3b-instruct-q4_K_M` | `qwen2.5:7b-instruct` | Same family already proven on this project's Indonesian content; bigger model fits comfortably now. (SEA-LION-8B was the *original* intended model per earlier comments in this file, but its Ollama availability is unverified -- worth trying as a follow-up experiment, not gambling on it during migration.) |
+| `OLLAMA_MODEL` | `qwen2.5:3b-instruct-q4_K_M` | `qwen3.5:9b` (official Ollama library tag — not a third-party namespace) | Newer generation, 256K architecture context vs qwen2.5's ~32K, expanded to 201 languages, ~6.6GB fits comfortably in 8GB VRAM. Verified real via Ollama's own library page, not assumed. (SEA-LION-8B was the *original* intended model per earlier comments in this file, but its Ollama availability is unverified -- worth trying as a follow-up experiment, not gambling on it during migration.) |
 | `TOP_K` | 6 | 8 | More retrieval headroom with GPU + more RAM |
 | `RERANK_CANDIDATE_K` / `BM25_CANDIDATE_K` | 25 | 35 | Same reason |
 | `MULTI_SOURCE_CANDIDATE_K` | 10 | 15 | Same reason |
-| `OLLAMA_CONTEXT_TOKENS` | 4096 (confirmed via `ollama ps` on the old laptop) | 8192 (**unverified guess**) | **Check this on the new machine** — run a real query, then `ollama ps`, and correct this value to match what Ollama actually reports. Too-high silently overflows the real context instead of falling back safely, which is exactly the failure mode this value exists to prevent. |
+| `OLLAMA_CONTEXT_TOKENS` | 4096 (confirmed via `ollama ps` on the old laptop) | 16384 (**unverified guess**) | **Check this on the new machine** — run a real query, then `ollama ps`, and correct this value to match what Ollama actually reports. Too-high silently overflows the real context instead of falling back safely, which is exactly the failure mode this value exists to prevent. |
 
 ## Verifying the move worked
 

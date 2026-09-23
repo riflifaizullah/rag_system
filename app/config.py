@@ -24,14 +24,17 @@ for _d in (DATA_DIR, CORPUS_DIR, CHROMA_DIR, SQLITE_DIR, SESSION_LOGS_DIR):
 EMBEDDING_MODEL = "paraphrase-multilingual-MiniLM-L12-v2"
 
 # Local LLM via Ollama. Raised from qwen2.5:3b-instruct-q4_K_M (the
-# temporary-laptop profile) now that there's a real GPU to run on -- picked
-# qwen2.5:7b-instruct specifically to stay in the same model family that
-# was already confirmed working well on this project's Indonesian content
-# all through the temporary-laptop phase, rather than gambling on
-# aisingapore/Llama-SEA-LION-v2-8B-IT's availability/behavior unverified.
-# Worth trying SEA-LION as a follow-up experiment once migration itself is
-# stable, not before.
-OLLAMA_MODEL = "qwen2.5:7b-instruct"
+# temporary-laptop profile) now that there's a real GPU to run on.
+# qwen3.5:9b (the OFFICIAL Ollama library tag -- not a third-party
+# namespace like frob/ or FieldMouse-AI/, and definitely not the
+# "abliterated" uncensored community variant that also shows up in search
+# results under a similar name) -- newer generation than qwen2.5, a 256K
+# architecture context window vs qwen2.5's ~32K, explicitly expanded to
+# 201 languages, and confirmed to fit comfortably in 8GB VRAM (~6.6GB).
+# aisingapore/Llama-SEA-LION-v2-8B-IT remains the original spec's intended
+# model and is worth trying as a follow-up experiment once migration
+# itself is stable, not gambled on now.
+OLLAMA_MODEL = "qwen3.5:9b"
 # Literal 127.0.0.1, not "localhost" -- on this machine "localhost" resolves
 # IPv6 (::1) first, Ollama isn't reachable there, and every request pays a
 # ~2 second connect-timeout-then-fallback-to-IPv4 tax before actually
@@ -71,12 +74,15 @@ RRF_K = 60  # standard RRF damping constant (Cormack et al.)
 # regardless of chunk-level retrieval quality.
 # IMPORTANT -- VERIFY THIS ON THE NEW MACHINE before trusting it: 4096 was
 # confirmed via `ollama ps` as what Ollama actually ran qwen2.5:3b at on
-# the old laptop, not assumed. This 8192 is a reasonable starting guess for
-# qwen2.5:7b on real hardware, NOT yet confirmed the same way -- check
-# `ollama ps` after a real query on the new machine and correct this value
-# to match reality. Using a too-large number here silently overflows the
-# real running context instead of falling back safely.
-OLLAMA_CONTEXT_TOKENS = 8192
+# the old laptop, not assumed. qwen3.5:9b's architecture supports up to
+# 256K, but Ollama's actual runtime context depends on its default num_ctx
+# for this model/available VRAM, which could be much smaller than the
+# architecture max -- this 16384 is an optimistic but UNVERIFIED starting
+# guess, not confirmed the same rigorous way. Check `ollama ps` after a
+# real query on the new machine and correct this value to match reality.
+# Using a too-large number here silently overflows the real running
+# context instead of falling back safely.
+OLLAMA_CONTEXT_TOKENS = 16384
 FULL_DOC_PROMPT_MARGIN_TOKENS = 1200  # system prompt + question + generation headroom
 CHARS_PER_TOKEN_ESTIMATE = 4  # rough heuristic, no tokenizer call needed for a fast fit-check
 
