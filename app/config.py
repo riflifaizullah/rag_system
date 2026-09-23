@@ -1,8 +1,11 @@
 """Central configuration for STK Online RAG.
 
-This is the temporary laptop profile (8GB RAM, MX330 2GB VRAM): a smaller
-LLM and reduced retrieval depth compared to the main-machine build, per the
-hardware section of the rebuild spec.
+Profile as of the migration to the new machine (i7-240H, RTX 5050 8GB VRAM)
+-- raised from the original temporary-laptop profile (8GB RAM, MX330 2GB
+VRAM) that every value here was tuned down for. sentence-transformers'
+SentenceTransformer/CrossEncoder auto-detect CUDA with zero code changes;
+they just need a CUDA-enabled torch build installed (the default pip
+install pulls CPU-only -- see MIGRATION.md) to actually use the GPU.
 """
 from pathlib import Path
 
@@ -20,13 +23,15 @@ for _d in (DATA_DIR, CORPUS_DIR, CHROMA_DIR, SQLITE_DIR, SESSION_LOGS_DIR):
 # Embeddings
 EMBEDDING_MODEL = "paraphrase-multilingual-MiniLM-L12-v2"
 
-# Local LLM via Ollama.
-# Main-machine profile uses aisingapore/Llama-SEA-LION-v2-8B-IT.
-# On this 8GB-RAM / 2GB-VRAM laptop that model doesn't fit alongside
-# Chroma/FastAPI/Streamlit/embeddings running concurrently, so we use a
-# smaller 3-4B class quantized instruct model instead (see README for the
-# SEA-LION-smaller-variant check that was done before falling back to this).
-OLLAMA_MODEL = "qwen2.5:3b-instruct-q4_K_M"
+# Local LLM via Ollama. Raised from qwen2.5:3b-instruct-q4_K_M (the
+# temporary-laptop profile) now that there's a real GPU to run on -- picked
+# qwen2.5:7b-instruct specifically to stay in the same model family that
+# was already confirmed working well on this project's Indonesian content
+# all through the temporary-laptop phase, rather than gambling on
+# aisingapore/Llama-SEA-LION-v2-8B-IT's availability/behavior unverified.
+# Worth trying SEA-LION as a follow-up experiment once migration itself is
+# stable, not before.
+OLLAMA_MODEL = "qwen2.5:7b-instruct"
 # Literal 127.0.0.1, not "localhost" -- on this machine "localhost" resolves
 # IPv6 (::1) first, Ollama isn't reachable there, and every request pays a
 # ~2 second connect-timeout-then-fallback-to-IPv4 tax before actually
@@ -35,13 +40,11 @@ OLLAMA_HOST = "http://127.0.0.1:11434"
 OLLAMA_TIMEOUT_SECONDS = 180
 
 # Retrieval
-# Raised from 4 -- confirmed live that a correct-but-lower-scoring chunk
-# (the real document's own answer, buried among several superficially
-# similar boilerplate-heavy chunks from the same document) sometimes
-# didn't make a top-4 cut even though it was well within the top-25
-# candidates the reranker already considers. Still well short of the
-# main-machine default; this is a modest widening, not the full value.
-TOP_K = 6
+# Raised again for the new hardware (was 4 on the temporary laptop, then 6
+# after confirming live that correct-but-lower-scoring chunks sometimes
+# missed the cutoff). A real GPU + more RAM can afford considering more
+# candidates without the latency cost this mattered for before.
+TOP_K = 8
 CHUNK_SIZE_CHARS = 1000
 CHUNK_OVERLAP_CHARS = 150
 
@@ -49,8 +52,8 @@ CHUNK_OVERLAP_CHARS = 150
 # cross-encoder that scores (question, chunk) jointly -- helps specifically
 # when several near-identical boilerplate clauses compete for the same slot.
 RERANK_ENABLED = True
-RERANK_CANDIDATE_K = 25
-RERANK_MODEL = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"  # ~470MB, multilingual incl. Indonesian, CPU-friendly
+RERANK_CANDIDATE_K = 35
+RERANK_MODEL = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"  # ~470MB, multilingual incl. Indonesian, now GPU-capable
 
 # Hybrid search: pure embedding similarity can rank a chunk containing the
 # exact WRONG Pasal number as more similar than the chunk with the right
@@ -59,17 +62,21 @@ RERANK_MODEL = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"  # ~470MB, multiling
 # identifier match embeddings can miss; both rank lists are combined via
 # reciprocal rank fusion before reranking.
 HYBRID_SEARCH_ENABLED = True
-BM25_CANDIDATE_K = 25
+BM25_CANDIDATE_K = 35
 RRF_K = 60  # standard RRF damping constant (Cormack et al.)
 
 # Full-document fallback: for "enumerate" or small-document "broad"
 # questions, skip retrieval entirely and inject the whole document when it
 # clearly fits the model's context window, guaranteeing completeness
-# regardless of chunk-level retrieval quality. 4096 is the context length
-# Ollama actually runs this model at by default (`ollama ps` reports this
-# at runtime), not the qwen2.5 architecture's own 32K max -- using the
-# larger number here would silently overflow the real running context.
-OLLAMA_CONTEXT_TOKENS = 4096
+# regardless of chunk-level retrieval quality.
+# IMPORTANT -- VERIFY THIS ON THE NEW MACHINE before trusting it: 4096 was
+# confirmed via `ollama ps` as what Ollama actually ran qwen2.5:3b at on
+# the old laptop, not assumed. This 8192 is a reasonable starting guess for
+# qwen2.5:7b on real hardware, NOT yet confirmed the same way -- check
+# `ollama ps` after a real query on the new machine and correct this value
+# to match reality. Using a too-large number here silently overflows the
+# real running context instead of falling back safely.
+OLLAMA_CONTEXT_TOKENS = 8192
 FULL_DOC_PROMPT_MARGIN_TOKENS = 1200  # system prompt + question + generation headroom
 CHARS_PER_TOKEN_ESTIMATE = 4  # rough heuristic, no tokenizer call needed for a fast fit-check
 
@@ -86,7 +93,7 @@ AMBIGUITY_SCORE_GAP = 0.03
 # labeled by file. More than that -> too many to write out in full, so
 # return a short labeled candidate list instead and let the next message
 # (naming one of them) get the full answer, scoped to just that file.
-MULTI_SOURCE_CANDIDATE_K = 10
+MULTI_SOURCE_CANDIDATE_K = 15
 MULTI_SOURCE_MAX_FILES = 3
 MULTI_SOURCE_CANDIDATE_LIST_MAX = 8
 
