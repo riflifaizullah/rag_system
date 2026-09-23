@@ -1,9 +1,14 @@
 # Virtual environment -- not portable across machines, recreate on each one
 .venv/
 
-# Runtime data: corpus PDFs, the vector index, and session/answer history.
-# Large and/or user-specific -- move via external drive, not git.
+# Runtime data: corpus PDFs and the vector index built from them both
+# contain real internal company documents (signed contracts, employee
+# health data) -- never goes to a third-party host, even private. Moves
+# via external drive only (see MIGRATION.md).
 data/
+
+# Same reason: this transcript quotes real document content throughout.
+claude_session_archive/
 
 # Python
 __pycache__/
