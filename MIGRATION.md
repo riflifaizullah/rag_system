@@ -23,15 +23,38 @@
 
 ## New laptop setup, in order
 
-1. ~~Clone the repo, `pip install -r requirements.txt`~~ — **already done.**
-   Just make sure you've pulled the latest (`git pull`) so you have the
-   `qwen3.5:9b` config update, not the earlier `qwen2.5:7b-instruct` one.
+0. **Disk space check** — before starting, make sure there's several GB
+   free: qwen3.5:9b is ~6.6GB, the embedding + reranker models are another
+   ~1GB combined, the CUDA-enabled torch wheel alone is ~2-3GB, plus
+   whatever the ~1000 real PDFs and the vector index built from them add
+   up to.
+1. **Virtual environment** — `.venv/` is git-ignored (not portable across
+   machines), so cloning the repo does NOT give you one. Create and
+   activate it before installing anything, don't install globally:
+   ```
+   python -m venv .venv
+   .venv\Scripts\Activate.ps1
+   pip install -r requirements.txt
+   ```
+   If PowerShell refuses to run the activation script with an execution-
+   policy error, this is a one-time fix (not a security downgrade, just
+   allows locally-created scripts to run):
+   ```
+   Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+   ```
+   Make sure you've pulled the latest code too (`git pull`), so you have
+   the `qwen3.5:9b` config update, not the earlier `qwen2.5:7b-instruct` one.
 2. **GPU-enabled torch** — the plain `pip install -r requirements.txt`
    installs the CPU-only build by default, so this step is still needed
    even though requirements are already installed. Check your driver's max
-   CUDA version first (`nvidia-smi`, top-right), then replace torch with a
-   matching CUDA build (Blackwell/RTX 50-series needs a recent build, e.g.
-   `cu128` if your driver supports it):
+   CUDA version first:
+   ```
+   nvidia-smi
+   ```
+   Look at "CUDA Version" in the top-right of the output. `cu128` (below)
+   needs a fairly recent driver -- if the number shown is lower than 12.8,
+   either update the NVIDIA driver first or use an earlier matching
+   `cuXXX` index URL instead of `cu128`. Once confirmed:
    ```
    pip uninstall torch torchvision torchaudio -y
    pip install torch --index-url https://download.pytorch.org/whl/cu128
@@ -39,14 +62,22 @@
    ```
    Should print `True` and your GPU's name. The embedder and reranker use
    CUDA automatically once this is true -- no code changes needed.
-3. **Ollama**, then the model:
+3. **Ollama** — the app itself isn't installed yet, only the model pull is
+   listed below. Install the Windows app first: `https://ollama.com/download`.
+   Then pull the model:
    ```
    ollama pull qwen3.5:9b
    ```
 4. **Tesseract OCR** — install the Windows build, include the Indonesian
    (`ind`) language pack, set `TESSDATA_PREFIX` to wherever its `tessdata`
-   folder ends up.
-5. **Poppler** — install, make sure it's on PATH.
+   folder ends up. Verify both after installing (new terminal window
+   needed for the env var to apply):
+   ```
+   tesseract --list-langs
+   ```
+   `ind` must appear in the list -- if it doesn't, re-run the installer's
+   modify/repair option and check the Indonesian language box.
+5. **Poppler** — install, make sure it's on PATH. Verify: `pdftoppm -v`.
 6. **Get the PDFs into `data/corpus/`** (auto-created the first time any
    app code runs, e.g. `python -c "from app import config"`), then build
    the index:
@@ -58,6 +89,13 @@
    corpus had.
 7. Run it: `uvicorn app.api:app --host 0.0.0.0 --port 8000` and
    `streamlit run streamlit_app.py`.
+
+(Optional, quality-of-life, not blocking) On the old laptop a PowerShell
+profile script auto-activated `.venv` when opening a terminal in this
+project folder, to avoid accidentally running commands against the wrong
+Python. That's a machine-local PowerShell setting, not project code, so it
+doesn't carry over via git -- worth re-doing once step 1's venv exists here
+too, but skip it for now if you just want the system running.
 
 ## What changed in `config.py` for this hardware (already committed)
 
