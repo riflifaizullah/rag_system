@@ -464,9 +464,17 @@ def _bm25_cache_key(source_filter: Optional[list[str]]):
 
 def _get_bm25_index(source_filter: Optional[list[str]]):
     """One BM25 index per distinct source_filter scope, invalidated whenever
-    the corpus changes (see invalidate_sources_cache()). Corpus is small
-    enough that building an index per distinct scope on demand is cheap;
-    no need for incremental updates."""
+    the corpus changes (see invalidate_sources_cache()) -- built once per
+    scope on demand and cached, not rebuilt per query, so this cost is paid
+    once per corpus change, not once per question.
+
+    The fetch itself is paginated (config.CHROMA_PAGE_SIZE, the same
+    pattern database.list_document_sources() already uses for SQLite) --
+    at real scale (thousands of PDFs, tens of thousands of chunks) a single
+    unpaginated collection.get() risks the same "too many SQL variables"
+    style limit CHROMA_PAGE_SIZE already exists elsewhere in this codebase
+    to avoid; this only ever showed up as "cheap" against the 20-file test
+    corpus this system was originally built and verified against."""
     key = _bm25_cache_key(source_filter)
     if key in _bm25_index_cache:
         return _bm25_index_cache[key]
@@ -475,10 +483,25 @@ def _get_bm25_index(source_filter: Optional[list[str]]):
     where = None
     if source_filter:
         where = {"source": {"$in": source_filter}} if len(source_filter) > 1 else {"source": source_filter[0]}
-    fetched = collection.get(where=where, include=["documents", "metadatas"])
-    ids = fetched.get("ids", [])
-    docs = fetched.get("documents", [])
-    metas = fetched.get("metadatas", [])
+
+    ids: list[str] = []
+    docs: list[str] = []
+    metas: list[dict] = []
+    offset = 0
+    while True:
+        fetched = collection.get(
+            where=where,
+            include=["documents", "metadatas"],
+            limit=config.CHROMA_PAGE_SIZE,
+            offset=offset,
+        )
+        page_ids = fetched.get("ids", [])
+        if not page_ids:
+            break
+        ids.extend(page_ids)
+        docs.extend(fetched.get("documents", []))
+        metas.extend(fetched.get("metadatas", []))
+        offset += config.CHROMA_PAGE_SIZE
 
     entry = None if not docs else (BM25Okapi([_tokenize(d) for d in docs]), ids, docs, metas)
     _bm25_index_cache[key] = entry

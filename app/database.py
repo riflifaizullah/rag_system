@@ -43,7 +43,8 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS documents (
                 source TEXT PRIMARY KEY,
                 content_hash TEXT NOT NULL,
-                indexed_at TEXT NOT NULL
+                indexed_at TEXT NOT NULL,
+                file_fingerprint TEXT
             );
 
             CREATE TABLE IF NOT EXISTS headings (
@@ -101,6 +102,11 @@ def init_db() -> None:
         if "response_tokens" not in existing_cols:
             conn.execute("ALTER TABLE answer_log ADD COLUMN response_tokens INTEGER")
 
+        # migration for DBs created before file_fingerprint existed
+        existing_doc_cols = {row["name"] for row in conn.execute("PRAGMA table_info(documents)").fetchall()}
+        if "file_fingerprint" not in existing_doc_cols:
+            conn.execute("ALTER TABLE documents ADD COLUMN file_fingerprint TEXT")
+
 
 # ---------------------------------------------------------------------------
 # Document sync registry
@@ -114,17 +120,32 @@ def get_document_hash(source: str) -> Optional[str]:
         return row["content_hash"] if row else None
 
 
-def upsert_document(source: str, content_hash: str) -> None:
+def get_document_fingerprint(source: str) -> Optional[str]:
+    """Cheap file-metadata fingerprint (mtime + size), checked before paying
+    for a full content_hash() read -- see sync_documents.sync_once(). At
+    thousands-of-files scale, hashing every file's full bytes on every sync
+    tick just to confirm "unchanged" is real, avoidable I/O; mtime+size
+    matching is the same fast-path trick git/rsync use before falling back
+    to a real hash."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT file_fingerprint FROM documents WHERE source = ?", (source,)
+        ).fetchone()
+        return row["file_fingerprint"] if row else None
+
+
+def upsert_document(source: str, content_hash: str, file_fingerprint: Optional[str] = None) -> None:
     with get_conn() as conn:
         conn.execute(
             """
-            INSERT INTO documents (source, content_hash, indexed_at)
-            VALUES (?, ?, datetime('now'))
+            INSERT INTO documents (source, content_hash, indexed_at, file_fingerprint)
+            VALUES (?, ?, datetime('now'), ?)
             ON CONFLICT(source) DO UPDATE SET
                 content_hash = excluded.content_hash,
-                indexed_at = excluded.indexed_at
+                indexed_at = excluded.indexed_at,
+                file_fingerprint = excluded.file_fingerprint
             """,
-            (source, content_hash),
+            (source, content_hash, file_fingerprint),
         )
 
 

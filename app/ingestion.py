@@ -376,7 +376,20 @@ _HEADING_PATTERNS = [
     re.compile(r"^(PASAL|Pasal)\s+\d+", re.IGNORECASE),
     re.compile(r"^(LAMPIRAN|Lampiran)\s+[A-Za-z0-9]+", re.IGNORECASE),
     re.compile(r"^(BAB|Bab)\s+[IVXLC0-9]+", re.IGNORECASE),
-    re.compile(r"^\d+(\.\d+)*\.?\s+\S+"),  # numbered section e.g. "3." or "3.1 Ruang Lingkup"
+    # numbered section e.g. "3." or "3.1 Ruang Lingkup" -- the lookahead
+    # requires a real letter somewhere in the trailing token, not just
+    # \S+ (any non-space run). Confirmed live: without it, this matched a
+    # revision-checkbox row ("REVISI KE : 0 1 2 3 4" renders as a bare
+    # "0 1 2 3 4" text line) as a false "heading", which then split a
+    # title-block metadata table in half at chunking time -- scattering a
+    # document's own NOMOR/FUNGSI fields into one chunk and its BERLAKU
+    # TMT/JUDUL/HALAMAN fields into another that doesn't repeat the
+    # number, so a later lookup for either field could land on only one
+    # half. A genuine numbered heading's text is always real words, never
+    # just more bare digits, so this excludes checkbox/pagination-style
+    # digit runs structurally instead of naming any specific corpus's
+    # checkbox convention.
+    re.compile(r"^\d+(\.\d+)*\.?\s+(?=\S*[A-Za-z])\S+"),
 ]
 
 _SENTENCE_END = re.compile(r"[.!?]$")
@@ -719,6 +732,13 @@ def content_hash(pdf_path: Path) -> str:
     return h.hexdigest()
 
 
+def file_fingerprint(pdf_path: Path) -> str:
+    """Cheap mtime+size fingerprint -- a single stat() call, no file read.
+    See database.get_document_fingerprint() for why this matters at scale."""
+    stat = pdf_path.stat()
+    return f"{stat.st_mtime_ns}:{stat.st_size}"
+
+
 def _normalize_line_for_repeat_check(text: str) -> str:
     text = re.sub(r"[^a-z0-9]+", " ", text.strip().lower())
     return re.sub(r"\d+", "#", text).strip()
@@ -897,7 +917,7 @@ def write_ingest_data(pdf_path: Path, data: dict, collection, embedder) -> int:
     else:
         remove_chunk_log(source)
 
-    database.upsert_document(source, content_hash(pdf_path))
+    database.upsert_document(source, content_hash(pdf_path), file_fingerprint(pdf_path))
     return len(all_chunks)
 
 

@@ -32,11 +32,24 @@ def sync_once(corpus_dir: Path = config.CORPUS_DIR, verbose: bool = False) -> di
 
     for name, path in disk_files.items():
         existing_hash = database.get_document_hash(name)
-        current_hash = ingestion.content_hash(path)
         if existing_hash is None:
             to_ingest[name] = path
             new_files.append(name)
-        elif existing_hash != current_hash:
+            continue
+
+        # Cheap mtime+size check first -- at thousands-of-files scale,
+        # reading every file's full bytes to hash it on every sync tick
+        # just to confirm "unchanged" is real, avoidable I/O. A missing
+        # fingerprint (a file recorded before this existed) always falls
+        # through to a real hash rather than being trusted blindly.
+        existing_fp = database.get_document_fingerprint(name)
+        current_fp = ingestion.file_fingerprint(path)
+        if existing_fp is not None and existing_fp == current_fp:
+            unchanged_files.append(name)
+            continue
+
+        current_hash = ingestion.content_hash(path)
+        if existing_hash != current_hash:
             to_ingest[name] = path
             updated_files.append(name)
         else:
