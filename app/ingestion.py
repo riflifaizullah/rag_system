@@ -642,13 +642,16 @@ def _strip_repeating_page_lines(pages: list[Page]) -> None:
 # Full ingestion of a single file
 # ---------------------------------------------------------------------------
 
-def ingest_file(pdf_path: Path, collection, embedder) -> int:
+def extract_ingest_data(pdf_path: Path) -> dict:
+    """CPU-bound half of ingestion: PDF parsing, OCR, heading detection, and
+    chunking -- no Chroma, no embedder, no sqlite. Touches nothing shared, so
+    it's the half that's safe to fan out across worker processes; the actual
+    writes stay serialized (see write_ingest_data() and its callers)."""
     source = pdf_path.name
     pages = extract_pdf_pages(pdf_path)
     _strip_repeating_page_lines(pages)
 
     headings = detect_headings(pages)
-    database.replace_headings(source, headings)
 
     headings_by_page: dict[int, list[str]] = {}
     for h in headings:
@@ -660,6 +663,26 @@ def ingest_file(pdf_path: Path, collection, embedder) -> int:
         chunks = chunk_page_text(page.full_text, page.page_num, headings_by_page.get(page.page_num))
         all_chunks.extend(chunks)
         ocr_confidence_by_page[page.page_num] = page.ocr_confidence
+
+    return {
+        "source": source,
+        "headings": headings,
+        "all_chunks": all_chunks,
+        "ocr_confidence_by_page": ocr_confidence_by_page,
+    }
+
+
+def write_ingest_data(pdf_path: Path, data: dict, collection, embedder) -> int:
+    """Chroma/sqlite-writing half of ingestion. Must run on whatever single
+    thread the rest of the app already funnels Chroma access through (see
+    retrieval._chroma_thread) -- never call this from more than one thread
+    or process at a time."""
+    source = data["source"]
+    headings = data["headings"]
+    all_chunks = data["all_chunks"]
+    ocr_confidence_by_page = data["ocr_confidence_by_page"]
+
+    database.replace_headings(source, headings)
 
     # remove any previously-indexed chunks for this source before re-adding
     try:
@@ -687,6 +710,11 @@ def ingest_file(pdf_path: Path, collection, embedder) -> int:
 
     database.upsert_document(source, content_hash(pdf_path))
     return len(all_chunks)
+
+
+def ingest_file(pdf_path: Path, collection, embedder) -> int:
+    data = extract_ingest_data(pdf_path)
+    return write_ingest_data(pdf_path, data, collection, embedder)
 
 
 def remove_file(source: str, collection) -> None:

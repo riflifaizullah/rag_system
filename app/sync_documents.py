@@ -5,6 +5,7 @@ implementation, four trigger paths."""
 from __future__ import annotations
 
 import json
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -22,18 +23,42 @@ def sync_once(corpus_dir: Path = config.CORPUS_DIR) -> dict:
     known_sources = set(database.list_document_sources())
 
     new_files, updated_files, unchanged_files, deleted_files = [], [], [], []
+    to_ingest: dict[str, Path] = {}
 
     for name, path in disk_files.items():
         existing_hash = database.get_document_hash(name)
         current_hash = ingestion.content_hash(path)
         if existing_hash is None:
-            ingestion.ingest_file(path, collection, embedder)
+            to_ingest[name] = path
             new_files.append(name)
         elif existing_hash != current_hash:
-            ingestion.ingest_file(path, collection, embedder)
+            to_ingest[name] = path
             updated_files.append(name)
         else:
             unchanged_files.append(name)
+
+    # PDF parsing/OCR (extract_ingest_data) is CPU-bound and per-file
+    # independent, so it's fanned out across worker processes. The actual
+    # writes (write_ingest_data) touch Chroma/the embedder/sqlite, which
+    # must stay on one consistent thread/process (see retrieval.py's
+    # _chroma_thread comment on the cross-thread ChromaDB bug) -- so results
+    # are written back sequentially here in the main process as each
+    # extraction finishes, never in parallel.
+    if len(to_ingest) == 1:
+        ((name, path),) = to_ingest.items()
+        data = ingestion.extract_ingest_data(path)
+        ingestion.write_ingest_data(path, data, collection, embedder)
+    elif to_ingest:
+        workers = min(config.INGEST_PARALLEL_WORKERS, len(to_ingest))
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(ingestion.extract_ingest_data, path): (name, path)
+                for name, path in to_ingest.items()
+            }
+            for future in as_completed(futures):
+                name, path = futures[future]
+                data = future.result()
+                ingestion.write_ingest_data(path, data, collection, embedder)
 
     for source in known_sources - set(disk_files.keys()):
         ingestion.remove_file(source, collection)

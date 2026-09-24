@@ -7,6 +7,7 @@ SentenceTransformer/CrossEncoder auto-detect CUDA with zero code changes;
 they just need a CUDA-enabled torch build installed (the default pip
 install pulls CPU-only -- see MIGRATION.md) to actually use the GPU.
 """
+import os
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -113,6 +114,13 @@ FILENAME_CACHE_TTL_SECONDS = 10
 
 # Sync
 SYNC_INTERVAL_MINUTES = 15
+# Per-file PDF parsing/OCR (the CPU-bound half of ingestion, see
+# ingestion.extract_ingest_data) runs in a process pool during sync -- this
+# machine's multi-core CPU can OCR several files at once instead of one at a
+# time. The actual Chroma/embedder/sqlite writes stay single-threaded
+# regardless (see ingestion.write_ingest_data and retrieval._chroma_thread),
+# so raising this only speeds up extraction, not the write phase.
+INGEST_PARALLEL_WORKERS = max(1, (os.cpu_count() or 4) - 1)
 
 # API
 API_HOST = "0.0.0.0"
