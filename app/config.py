@@ -157,6 +157,19 @@ CHARS_PER_TOKEN_ESTIMATE = 4  # rough heuristic, no tokenizer call needed for a 
 # 135,704 didn't); revisit if a real case lands closer to the gap.
 FULL_DOC_FALLBACK_MAX_CHARS = 25000
 
+# Poppler/Tesseract subprocess timeouts (seconds) -- confirmed live these
+# were needed: with none at all, a real full-corpus ingest ran 15 parallel
+# workers each rendering at a higher DPI, hit some kind of resource
+# contention, and hung completely for 7+ hours with zero files completed
+# and no error, because nothing was ever bounding how long a single
+# subprocess call could take. ingestion.py's existing broad try/except
+# around each of these calls already degrades a single page gracefully
+# (empty OCR text, page treated as unreadable) -- these timeouts just make
+# sure that except block is actually reachable instead of blocking forever.
+OCR_RENDER_TIMEOUT_SECONDS = 60  # convert_from_path (Poppler pdftoppm)
+OCR_RECOGNIZE_TIMEOUT_SECONDS = 60  # pytesseract.image_to_data
+OCR_OSD_TIMEOUT_SECONDS = 15  # pytesseract.image_to_osd (a cheaper pre-pass)
+
 # Ambiguity detection: if the top-2 distinct-source retrieval scores are
 # within this gap, and no document was explicitly named, ask for clarification.
 AMBIGUITY_SCORE_GAP = 0.03

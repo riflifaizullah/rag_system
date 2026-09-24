@@ -113,17 +113,28 @@ def _extract_page_lines(page: "pdfplumber.page.Page") -> list[Line]:
 
 
 _OCR_LANG = "ind+eng"  # Indonesian first: the corpus is predominantly Indonesian legal/SOP text
-# REVERTED from 400 back to 200 -- confirmed live that 400 DPI, while it
-# did fix a real single-page digit-recognition case in isolation, caused
-# the real full-corpus ingest to hang: with INGEST_PARALLEL_WORKERS
-# workers each rendering at 400 DPI simultaneously (4x the pixels of 200
-# DPI per page), 15 concurrent pdftoppm processes sat for 7+ hours
-# accumulating under 1.5 CPU-seconds each -- a resource-contention stall
-# under real concurrency, not something the earlier one-page-at-a-time
-# tests could have caught. 200 DPI is the value verified safe across this
-# entire project's testing at real parallelism; raising it again would
-# need pairing with reduced parallelism and a real concurrent-load test,
-# not just a single-page check, before trusting it in a real run again.
+# 200. History (see git log for the full back-and-forth): raised to 400
+# after an isolated single-page test recovered a digit Tesseract dropped
+# at 200 ("21 Agustus 2025" -> "Agustus 2025"). Deployed straight into the
+# real ~1131-file ingest without a concurrent-load test first, and the
+# whole pipeline stalled for 7+ hours with zero files completed. Added
+# real subprocess timeouts (OCR_RENDER_TIMEOUT_SECONDS etc., kept
+# regardless of DPI -- a genuine, unconditional safety improvement) and
+# re-tested 400 properly this time with a real concurrent-load test (15
+# real files, config.INGEST_PARALLEL_WORKERS parallel workers, matching
+# real production concurrency): confirmed safe, no hangs, all 15 completed
+# (12 fast, 3 large documents taking 8-11.5 minutes each -- real work
+# scaling with size, not a stall).
+#
+# But then re-checked the ORIGINAL motivating digit through the actual
+# full extraction pipeline (orientation correction + preprocessing +
+# column reconstruction together, not the narrower isolated single-page
+# OCR call used for the first test) -- confirmed live it's back to
+# dropping the digit ("Agustus 2025", no "21") even at 400 DPI. The
+# accuracy benefit that justified paying for 400's extra processing time
+# in the first place does not reliably reproduce through the real
+# pipeline, so there's no longer a good reason to pay that cost. Reverted
+# to 200, the historically stable value, while keeping the timeout fix.
 _OCR_DPI = 200
 
 
@@ -234,7 +245,9 @@ def _correct_orientation(image: "Image.Image") -> "Image.Image":
     it's actually confident; otherwise leave the page alone rather than
     risk turning a working page into garbage."""
     try:
-        osd = pytesseract.image_to_osd(image, output_type=pytesseract.Output.DICT)
+        osd = pytesseract.image_to_osd(
+            image, output_type=pytesseract.Output.DICT, timeout=config.OCR_OSD_TIMEOUT_SECONDS
+        )
         rotation = osd.get("rotate", 0)
         confidence = osd.get("orientation_conf", 0)
     except Exception:
@@ -255,14 +268,18 @@ def _ocr_page(pdf_path: Path, page_num: int) -> tuple[str, Optional[float]]:
         return "", None
     try:
         images = convert_from_path(
-            str(pdf_path), first_page=page_num, last_page=page_num, dpi=_OCR_DPI
+            str(pdf_path), first_page=page_num, last_page=page_num, dpi=_OCR_DPI,
+            timeout=config.OCR_RENDER_TIMEOUT_SECONDS,
         )
         if not images:
             return "", None
         oriented = _correct_orientation(images[0])
         processed = _preprocess_for_ocr(oriented)
 
-        data = pytesseract.image_to_data(processed, lang=_OCR_LANG, output_type=pytesseract.Output.DICT)
+        data = pytesseract.image_to_data(
+            processed, lang=_OCR_LANG, output_type=pytesseract.Output.DICT,
+            timeout=config.OCR_RECOGNIZE_TIMEOUT_SECONDS,
+        )
         text = _reconstruct_text_from_ocr_data(data)
         confidences = [float(c) for c in data.get("conf", []) if c not in ("-1", -1) and float(c) >= 0]
         avg_confidence = round(sum(confidences) / len(confidences), 1) if confidences else None
@@ -296,7 +313,8 @@ def _describe_page_image(pdf_path: Path, page_num: int) -> Optional[str]:
         return None
     try:
         images = convert_from_path(
-            str(pdf_path), first_page=page_num, last_page=page_num, dpi=_OCR_DPI
+            str(pdf_path), first_page=page_num, last_page=page_num, dpi=_OCR_DPI,
+            timeout=config.OCR_RENDER_TIMEOUT_SECONDS,
         )
         if not images:
             return None
