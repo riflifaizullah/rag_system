@@ -18,6 +18,18 @@ Later additions, layered onto the same retrieve() pipeline in this order:
     the above outright when the question names a specific clause/section
     number, because dense retrieval still doesn't key strongly on a literal
     number difference between otherwise-similar clauses.
+  - own-document-code boost (_own_document_code_boost()): when a question
+    is scoped to exactly one document, ensures a chunk containing that
+    document's OWN full document number (derived from its filename, the
+    same real numbering convention every indexed file follows) is present
+    in the retrieved set. Confirmed live: a chunk from a DIFFERENT document
+    referenced inside the scoped one (e.g. a related policy listed in a
+    "Daftar Lampiran" appendix, with an incomplete/placeholder-style
+    number) out-ranked the scoped document's own real title-block chunk --
+    both are short, similarly-formatted "NOMOR / BERLAKU TMT" snippets the
+    cross-encoder can't tell apart from text alone, since doing so needs
+    document-structure awareness (this is the cover page vs. this is an
+    appendix entry), not just topical similarity.
   - the shorthand-matching regex (_build_shorthand_patterns()), the
     identifier-boost pattern, and the broad-category word detection
     (_category_candidates_from_headings()) are all built from real indexed
@@ -349,6 +361,99 @@ def _meta_ocr_confidence(meta: dict) -> Optional[float]:
     return None if val is None or val < 0 else val
 
 
+# Every real indexed file follows the same document-numbering convention
+# regardless of type (SOP, TKO, TKI, TKPA, contract): a letter-dash-digits
+# code, a department/DSI code, a 4-digit year, and an "S" revision suffix
+# (e.g. "A-035-DSI3000-2025-S9", "B-020-DSI0400-2023-S9",
+# "C-026-DSI1310-2026-S9") -- derived structurally from that observed
+# format across many real different filenames, not one hardcoded code.
+_DOC_CODE_RE = re.compile(
+    r"(?<![A-Za-z0-9])([A-Z]-\d+)-([A-Za-z0-9]+)-(\d{4})-S(\d+)(?![A-Za-z0-9])"
+)
+
+
+def _source_document_code(source: str) -> Optional[str]:
+    match = _DOC_CODE_RE.search(source)
+    if not match:
+        return None
+    # Normalize the whole matched span (not the groups reassembled without
+    # their original separators) so a filename's dashes and an in-document
+    # mention's slashes/dashes normalize to the exact same token structure,
+    # not just the same characters in a different arrangement.
+    return _normalize_for_fuzzy_match(match.group(0))
+
+
+def _own_document_code_boost(source_filter: Optional[list[str]]) -> list[dict]:
+    """When a question is scoped to exactly one document, make sure a chunk
+    containing that document's OWN full document number is present in the
+    retrieved set -- confirmed live this matters: a chunk from a DIFFERENT
+    document referenced inside the scoped one (a related policy listed in
+    an appendix, with an incomplete/placeholder-style number like
+    "A-..../DSI3000/2025-S9") out-scored the scoped document's own real
+    title-block chunk under reranking, since both are short, similarly-
+    formatted metadata snippets. The scoped document's real number is
+    derived from its own filename (the corpus's real, observed numbering
+    convention), not guessed -- a chunk containing that number IN FULL is
+    strong direct evidence it's genuinely this document's own metadata,
+    not merely a mention of a similarly-formatted different one (whose
+    number, being different, won't match).
+
+    A large document can have several scattered chunks that each contain
+    the own-code (confirmed live: a stray page-17 remnant of the running
+    header carried just the "NOMOR : ..." line with no other field, having
+    lost the rest to _strip_repeating_page_lines() elsewhere) -- picking
+    the wrong one wins the number-match but still misses whatever field the
+    question actually needs. A document's real cover/title-block metadata
+    is essentially always on its first few pages, never deep in the body,
+    so among every chunk containing the own-code, the one on the lowest
+    page number is preferred -- a general structural fact about how
+    business documents are laid out, not specific to any one document.
+
+    A title-block metadata table can also be split across a chunk boundary
+    (confirmed live: a real table's own document-number field ended one
+    chunk, with its BERLAKU TMT/JUDUL/HALAMAN fields continuing into the
+    next chunk, which doesn't repeat the number and so wouldn't match on
+    its own) -- the chunk immediately following the selected one (by
+    page/chunk_index order, same source) is included too, so a split
+    table's other half stays available. This is a generic char-count
+    chunking-boundary phenomenon that can happen to any short metadata
+    table landing near the chunk-size cutoff, not specific to any one
+    document's content."""
+    if not source_filter or len(source_filter) != 1:
+        return []
+    own_code = _source_document_code(source_filter[0])
+    if not own_code:
+        return []
+
+    collection = get_collection()
+    all_chunks = collection.get(where={"source": source_filter[0]}, include=["documents", "metadatas"])
+    entries = [
+        (meta.get("page") or 0, meta.get("chunk_index") or 0, doc, meta)
+        for doc, meta in zip(all_chunks.get("documents", []), all_chunks.get("metadatas", []))
+    ]
+    candidates = [e for e in entries if own_code in _normalize_for_fuzzy_match(e[2])]
+    if not candidates:
+        return []
+    best = min(candidates, key=lambda e: (e[0], e[1]))
+
+    def _to_hit(entry: tuple) -> dict:
+        _, _, doc, meta = entry
+        return {
+            "text": doc,
+            "source": meta.get("source"),
+            "page": meta.get("page"),
+            "distance": 0.0,
+            "score": 1.0,
+            "ocr_confidence": _meta_ocr_confidence(meta),
+        }
+
+    results = [_to_hit(best)]
+    later = sorted((e for e in entries if (e[0], e[1]) > (best[0], best[1])), key=lambda e: (e[0], e[1]))
+    if later:
+        results.append(_to_hit(later[0]))
+    return results
+
+
 def _tokenize(text: str) -> list[str]:
     return re.findall(r"\w+", text.lower())
 
@@ -496,6 +601,15 @@ def retrieve(question: str, source_filter: Optional[list[str]] = None, k: int = 
     if boost and not any(h["text"] == boost["text"] for h in hits):
         boost.setdefault("ocr_confidence", None)
         hits = [boost] + hits[: k - 1]
+
+    own_doc_boosts = [
+        b for b in _own_document_code_boost(source_filter)
+        if not any(h["text"] == b["text"] for h in hits)
+    ]
+    if own_doc_boosts:
+        for b in own_doc_boosts:
+            b.setdefault("ocr_confidence", None)
+        hits = own_doc_boosts + hits[: max(0, k - len(own_doc_boosts))]
 
     return hits
 
