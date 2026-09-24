@@ -43,6 +43,11 @@ OLLAMA_MODEL = "qwen3.5:9b"
 # starting (confirmed live: 2040ms vs 4ms for the identical request).
 OLLAMA_HOST = "http://127.0.0.1:11434"
 OLLAMA_TIMEOUT_SECONDS = 180
+# Full-document-fallback prompts (the whole document injected, not just
+# retrieved chunks) are far bigger than a normal retrieval prompt -- 180s
+# was confirmed live to be too tight for one (~4200 tokens) right after the
+# VLM had been swapped into VRAM, raising a Timeout instead of completing.
+OLLAMA_FULL_DOC_TIMEOUT_SECONDS = 420
 
 # Vision-language model for diagram/image-heavy pages (see
 # ingestion._page_is_graphical) -- confirmed real via Ollama's official
@@ -105,6 +110,22 @@ RERANK_MODEL = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"  # ~470MB, multiling
 HYBRID_SEARCH_ENABLED = True
 BM25_CANDIDATE_K = 35
 RRF_K = 60  # standard RRF damping constant (Cormack et al.)
+
+# Multi-source discovery's "how many distinct documents compete for this
+# question" decision (see generation.generate_answer) must use the
+# reranked score, not the raw cosine score -- confirmed live: for a
+# question genuinely about one document (TKO Kerja Lembur), the raw cosine
+# score alone put two unrelated documents' boilerplate-matching chunks at
+# 0.28-0.41 similarity, enough to count as "competing" sources, while the
+# cross-encoder rerank score correctly scored the one truly relevant chunk
+# at +2.74 and every other chunk from ALL documents (including the correct
+# one's other chunks) between -1.7 and -6.2 -- a clean, wide gap the raw
+# cosine score doesn't show at all. A source only really "competes" if its
+# best reranked score comes within this gap of the single best score
+# across all candidates; anything further behind is noise the reranker
+# already flagged, not real ambiguity. Provisional -- calibrated against
+# one real case, revisit if more real examples land closer to the gap.
+MULTI_SOURCE_RERANK_GAP = 3.0
 
 # Full-document fallback: for "enumerate" or small-document "broad"
 # questions, skip retrieval entirely and inject the whole document when it

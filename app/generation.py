@@ -106,34 +106,56 @@ def _fits_in_context(text: str) -> bool:
     return estimated_tokens <= budget_tokens
 
 
-def call_ollama(prompt: str, _retried: bool = False) -> tuple[str, Optional[int], Optional[int]]:
+def call_ollama(
+    prompt: str, _retried: bool = False, timeout: Optional[int] = None
+) -> tuple[str, Optional[int], Optional[int]]:
     """Returns (response_text, prompt_tokens, response_tokens). Ollama's
     payload carries these as prompt_eval_count/eval_count on every call --
     previously read only for the response text and the counts discarded,
     so per-session usage was invisible without digging through Ollama's own
     logs. Token counts are the RAG app's own runtime LLM cost, a separate
-    concept from Claude Code's development-time usage building this app."""
+    concept from Claude Code's development-time usage building this app.
+
+    Explicit num_ctx matters here: without it, Ollama runs this model at
+    its own default context, which can silently be smaller than
+    OLLAMA_CONTEXT_TOKENS -- the value this app's own size-fit checks
+    (_fits_in_context) assume is available. Passing it explicitly makes
+    the real running context match what the app already believes it is,
+    the same fix already applied to the VLM's context in ingestion.py."""
     try:
         resp = requests.post(
             f"{config.OLLAMA_HOST}/api/generate",
-            json={"model": config.OLLAMA_MODEL, "prompt": prompt, "stream": False},
-            timeout=config.OLLAMA_TIMEOUT_SECONDS,
+            json={
+                "model": config.OLLAMA_MODEL,
+                "prompt": prompt,
+                "stream": False,
+                "options": {"num_ctx": config.OLLAMA_CONTEXT_TOKENS},
+            },
+            timeout=timeout or config.OLLAMA_TIMEOUT_SECONDS,
         )
         resp.raise_for_status()
-    except requests.exceptions.HTTPError:
+    except (requests.exceptions.HTTPError, requests.exceptions.Timeout):
         # On this 8GB-RAM laptop, Ollama unloads the idle model and an
         # occasional first request after reload transiently 500s while it
-        # reloads under memory pressure. One retry clears it; a second
-        # failure is a real error and should propagate.
+        # reloads under memory pressure. Confirmed live this can also
+        # surface as an outright Timeout rather than a clean HTTP error --
+        # a large full-document-fallback prompt exceeded
+        # OLLAMA_TIMEOUT_SECONDS right after another model (the VLM) had
+        # been swapped into VRAM. Same transient cause, same one-retry fix;
+        # a second failure is a real error and should propagate.
         if _retried:
             raise
-        return call_ollama(prompt, _retried=True)
+        return call_ollama(prompt, _retried=True, timeout=timeout)
     payload = resp.json()
-    return (
-        payload.get("response", "").strip(),
-        payload.get("prompt_eval_count"),
-        payload.get("eval_count"),
-    )
+    text = payload.get("response", "").strip()
+    if not text and not _retried:
+        # Confirmed live: a request can come back with a real 200 status
+        # but an empty response body -- observed once during heavy Ollama
+        # load (another model being swapped into VRAM at the same time).
+        # Not an HTTPError, so the retry above never caught it; one retry
+        # clears it the same way a transient reload does.
+        return call_ollama(prompt, _retried=True, timeout=timeout)
+    return (text, payload.get("prompt_eval_count"), payload.get("eval_count"))
 
 
 # ---------------------------------------------------------------------------
@@ -341,12 +363,38 @@ def generate_answer(
     # come back through here with _forced_source set.
     if not named_sources:
         wide_hits = retrieval.retrieve(question, source_filter=None, k=config.MULTI_SOURCE_CANDIDATE_K)
+
+        # Group by source using the RERANKED score, not the raw cosine
+        # score -- confirmed live this matters: raw cosine similarity alone
+        # put two unrelated documents' boilerplate-matching chunks at
+        # 0.28-0.41 (Pertamina's TKO/TKI title-block and revision-table
+        # boilerplate is nearly identical across unrelated documents),
+        # enough to count as "competing" sources and wrongly trigger the
+        # "too many documents" fallback below for a question that actually
+        # had exactly one real answer. The cross-encoder rerank score
+        # correctly told them apart (the one truly relevant chunk scored
+        # +2.74, everything else -1.7 to -6.2) -- using it here is what
+        # rerank() exists for in the first place (see its own docstring).
+        def _relevance(h: dict) -> float:
+            return h.get("rerank_score", h["score"])
+
         best_per_source: dict[str, dict] = {}
         for h in wide_hits:
             src = h["source"]
-            if src not in best_per_source or h["score"] > best_per_source[src]["score"]:
+            if src not in best_per_source or _relevance(h) > _relevance(best_per_source[src]):
                 best_per_source[src] = h
-        ranked_sources = sorted(best_per_source.items(), key=lambda kv: kv[1]["score"], reverse=True)
+        ranked_sources = sorted(best_per_source.items(), key=lambda kv: _relevance(kv[1]), reverse=True)
+
+        # A source only really "competes" if it comes within a reasonable
+        # gap of the single best (reranked) score -- otherwise it's exactly
+        # the kind of weak/coincidental match the reranker exists to filter
+        # out, not genuine ambiguity about which document answers this.
+        if ranked_sources:
+            top_score = _relevance(ranked_sources[0][1])
+            ranked_sources = [
+                (src, hit) for src, hit in ranked_sources
+                if top_score - _relevance(hit) <= config.MULTI_SOURCE_RERANK_GAP
+            ]
 
         if not ranked_sources:
             answer = "Maaf, informasi tersebut tidak ditemukan dalam dokumen yang tersedia."
@@ -420,7 +468,9 @@ def generate_answer(
         full_text = retrieval.get_full_document_text(named_sources[0])
         if full_text and _fits_in_context(full_text):
             prompt = build_full_document_prompt(question, named_sources[0], full_text)
-            answer, prompt_tokens, response_tokens = call_ollama(prompt)
+            answer, prompt_tokens, response_tokens = call_ollama(
+                prompt, timeout=config.OLLAMA_FULL_DOC_TIMEOUT_SECONDS
+            )
             answer += _build_footer(["Dihasilkan dari keseluruhan isi dokumen, bukan potongan teks."])
             database.log_answer(
                 session_id, question, answer, None, looks_like_hedging(answer),
