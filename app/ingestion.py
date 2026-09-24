@@ -113,7 +113,14 @@ def _extract_page_lines(page: "pdfplumber.page.Page") -> list[Line]:
 
 
 _OCR_LANG = "ind+eng"  # Indonesian first: the corpus is predominantly Indonesian legal/SOP text
-_OCR_DPI = 200  # 150-200 is the accepted range; low DPI silently hurts recognition quality
+# Confirmed live: 200 DPI dropped a digit from a real date ("21 Agustus
+# 2025" -> "Agustus 2025", losing "21" entirely). Compared 200/300/400 DPI
+# on the exact same real page: 200 lost the digit, 300 lost the whole
+# BERLAKU TMT line, 400 read "21 Agustus 2025" correctly and completely.
+# Not a monotonic "higher is always better" result -- 400 is the verified
+# value for this real case, not a guess. Costs more OCR time per scanned
+# page; worth it on this hardware for the accuracy gain on real dates.
+_OCR_DPI = 400
 
 
 def _preprocess_for_ocr(image: "Image.Image") -> "Image.Image":
@@ -147,7 +154,19 @@ def _reconstruct_text_from_ocr_data(data: dict) -> str:
     word space -- splitting there into a separate output line lets each
     column be read (and later heading/field-detection logic) on its own,
     without merging unrelated columns. Structural, from real pixel
-    positions -- not a guess based on this corpus's specific field names."""
+    positions -- not a guess based on this corpus's specific field names.
+
+    Known open limitation, confirmed live: a dense, fine-grained multi-
+    column FORM (a 6-column signature/routing sheet, not a simple 2-column
+    title block) still produces word-order-scrambled output even after
+    ordering lines by real vertical position instead of Tesseract's own
+    line numbering -- the underlying ambiguity is Tesseract's own row/
+    column detection on that specific grid density, not just the output
+    ordering. Fixing this properly would need real table-structure
+    detection (image-based cell/grid-line analysis), not another word-
+    position heuristic -- not attempted here since an untested guess on a
+    function every scanned page in the corpus goes through isn't worth the
+    regression risk for one document's layout."""
     n = len(data.get("text", []))
     groups: dict[tuple, list[int]] = {}
     for i in range(n):
@@ -156,8 +175,21 @@ def _reconstruct_text_from_ocr_data(data: dict) -> str:
         key = (data["block_num"][i], data["par_num"][i], data["line_num"][i])
         groups.setdefault(key, []).append(i)
 
+    # Order lines by their real vertical (top) pixel position, not by
+    # Tesseract's own block/par/line numbering -- confirmed live: a real
+    # multi-column, multi-row table (a 6-column signature/routing sheet)
+    # produced word-order-scrambled output, because Tesseract's internal
+    # line numbering isn't guaranteed to be a single globally-monotonic
+    # top-to-bottom sequence across a fine-grained grid of narrow columns
+    # the way it reliably is for the simpler 2-column title-block case
+    # this function was originally built for. The word-level bounding
+    # boxes' own top coordinate is ground truth for visual reading order
+    # regardless of how Tesseract grouped them.
+    def _group_top(key: tuple) -> int:
+        return min(data["top"][i] for i in groups[key])
+
     output_lines = []
-    for key in sorted(groups.keys()):
+    for key in sorted(groups.keys(), key=_group_top):
         idxs = sorted(groups[key], key=lambda i: data["left"][i])
         words = [(data["left"][i], data["width"][i], data["text"][i]) for i in idxs]
         gaps = [words[k + 1][0] - (words[k][0] + words[k][1]) for k in range(len(words) - 1)]

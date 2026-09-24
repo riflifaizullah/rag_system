@@ -368,8 +368,21 @@ def _meta_ocr_confidence(meta: dict) -> Optional[float]:
 # "C-026-DSI1310-2026-S9") -- derived structurally from that observed
 # format across many real different filenames, not one hardcoded code.
 _DOC_CODE_RE = re.compile(
-    r"(?<![A-Za-z0-9])([A-Z]-\d+)-([A-Za-z0-9]+)-(\d{4})-S(\d+)(?![A-Za-z0-9])"
+    r"(?<![A-Za-z0-9])([A-Z])[\s\-–]*(\d+)[\s\-–/]+([A-Za-z0-9]+)[\s\-–/]+"
+    r"(\d{4})[\s\-–]*S[\s]*(\d+)(?![A-Za-z0-9])"
 )
+# Confirmed live this needed to be looser than the filename convention
+# alone: real document TEXT can render the same code with different
+# separators than its filename does -- e.g. a filename's "A-035-..." (a
+# plain hyphen, no spaces) appeared inside one real document's own content
+# as "C – 035/..." (an en-dash WITH spaces around it). Both the letter-
+# digit separator and the segment separators tolerate whitespace/hyphen/
+# en-dash so either real rendering matches, while still requiring the
+# full structural shape (letter, digits, alnum code, 4-digit year, "S" +
+# digits) -- a placeholder/incomplete reference ("A-..../DSI3000/2025-S9",
+# confirmed live as the wrong-document case _own_document_code_boost()
+# exists to exclude) still correctly fails to match, since dots aren't
+# digits.
 
 
 def _source_document_code(source: str) -> Optional[str]:
@@ -452,6 +465,84 @@ def _own_document_code_boost(source_filter: Optional[list[str]]) -> list[dict]:
     if later:
         results.append(_to_hit(later[0]))
     return results
+
+
+_TITLE_BLOCK_FIELD_RE = re.compile(r"[^\s:]{2,20}\s*:\s*\S")
+
+
+def find_foreign_document_codes(source: str) -> list[dict]:
+    """Audits ONE document for a real, confirmed-live anomaly: a page whose
+    own title-block structurally self-identifies as a DIFFERENT document
+    than this file's own filename/cover implies -- confirmed live on one
+    real corpus file, whose filename and cover page claim one document
+    (C-035) but whose page 3 is an intact title-block table for a
+    completely different document (C-023). This is a source-data mixing
+    problem (wrong pages assembled into the PDF at the source), not
+    something ingestion/retrieval code can fix -- this only detects and
+    reports it for human review.
+
+    A real citation of another document's number in ordinary body prose
+    (a REFERENSI list) is common and NOT flagged -- only a foreign code
+    found inside its own short, title-block-SHAPED chunk (multiple
+    colon-separated "Label : Value" fields, the same structural signature
+    used elsewhere in this file for detecting real title-blocks) counts,
+    since a real citation reads as a sentence, not a standalone field
+    table.
+
+    Not every real filename embeds its own document code (confirmed live:
+    the exact file this was built to catch, "27._TKI_Portal_STK_Online.pdf",
+    is named descriptively, not by code, so _source_document_code() on the
+    filename alone returns None and this check would silently never fire
+    for it) -- when the filename doesn't give a code, the code found in the
+    lowest-page title-block-shaped chunk is used as the reference instead,
+    since a document's own real identity is reliably on its earliest pages
+    (the same assumption _own_document_code_boost() already relies on).
+
+    Known open limitation, confirmed live: on the exact motivating file
+    above, this still doesn't fire, because that file's own cover page has
+    NO colon-separated fields at all (just plain title lines), so
+    _is_title_block() never recognizes ANY of its chunks as a title-block
+    -- own_code stays None and the whole check returns empty. Detecting a
+    plain-title cover (no colons) as this document's identity anchor would
+    need a different, not-yet-designed signal; flagged as a real gap
+    rather than silently claimed as solved."""
+    collection = get_collection()
+    all_chunks = collection.get(where={"source": source}, include=["documents", "metadatas"])
+    entries = list(zip(all_chunks.get("documents", []), all_chunks.get("metadatas", [])))
+
+    def _is_title_block(doc: str) -> bool:
+        return len(doc) <= 400 and len(_TITLE_BLOCK_FIELD_RE.findall(doc)) >= 2
+
+    own_code = _source_document_code(source)
+    if own_code is None:
+        title_block_entries = sorted(
+            (e for e in entries if _is_title_block(e[0])),
+            key=lambda e: (e[1].get("page") or 0, e[1].get("chunk_index") or 0),
+        )
+        for doc, _ in title_block_entries:
+            m = _DOC_CODE_RE.search(doc)
+            if m:
+                own_code = _normalize_for_fuzzy_match(m.group(0))
+                break
+    if own_code is None:
+        return []  # no way to establish this document's own identity at all
+
+    findings = []
+    for doc, meta in entries:
+        if not _is_title_block(doc):
+            continue
+        for match in _DOC_CODE_RE.finditer(doc):
+            code = _normalize_for_fuzzy_match(match.group(0))
+            if code != own_code:
+                findings.append(
+                    {
+                        "page": meta.get("page"),
+                        "chunk_index": meta.get("chunk_index"),
+                        "found_code": match.group(0),
+                        "text": doc,
+                    }
+                )
+    return findings
 
 
 def _tokenize(text: str) -> list[str]:
