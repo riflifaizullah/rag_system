@@ -28,7 +28,9 @@ Two later additions layered on top:
 """
 from __future__ import annotations
 
+import base64
 import hashlib
+import io
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -36,6 +38,7 @@ from typing import Optional
 
 import numpy as np
 import pdfplumber
+import requests
 
 from app import config, database
 
@@ -220,6 +223,81 @@ def _ocr_page(pdf_path: Path, page_num: int) -> tuple[str, Optional[float]]:
         return "", None
 
 
+def _page_is_graphical(page: "pdfplumber.page.Page") -> bool:
+    """A page whose real content is a diagram reads very differently at the
+    structural level than either a flat scan or an ordinary text/table page
+    -- confirmed live (see config.VLM_MIN_CURVES): a scan is one raster
+    image with zero vector drawing primitives, an ordinary table-heavy page
+    has plenty of rects (cell borders) but few curves, while a real
+    vector-drawn diagram (pipes, circular pump/valve icons) is dense with
+    curves. Curve count is therefore the discriminating signal -- image
+    presence/area alone would wrongly flag every scanned page too."""
+    return len(page.curves) >= config.VLM_MIN_CURVES
+
+
+def _describe_page_image(pdf_path: Path, page_num: int) -> Optional[str]:
+    """Renders the page and asks the vision-language model to describe it --
+    only called for pages _page_is_graphical() flagged, never for ordinary
+    pages. No grayscale/binarization here (unlike _ocr_page): a VLM benefits
+    from color (e.g. distinguishing a red pipe from a blue one), where OCR
+    only cares about character edges."""
+    if not _OCR_AVAILABLE or not config.VLM_ENABLED:
+        return None
+    try:
+        images = convert_from_path(
+            str(pdf_path), first_page=page_num, last_page=page_num, dpi=_OCR_DPI
+        )
+        if not images:
+            return None
+        oriented = _correct_orientation(images[0])
+    except Exception:
+        return None
+    return _describe_image_with_vlm(oriented)
+
+
+def _describe_image_with_vlm(image: "Image.Image", _retried: bool = False) -> Optional[str]:
+    buf = io.BytesIO()
+    image.save(buf, format="PNG")
+    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+    try:
+        resp = requests.post(
+            f"{config.OLLAMA_HOST}/api/generate",
+            json={
+                "model": config.VLM_MODEL,
+                "prompt": (
+                    "Describe this diagram or image in detail. List every "
+                    "visible label or text exactly as written, then describe "
+                    "the shapes and how they connect (arrows, lines, flow "
+                    "direction, groupings). Respond in the same language as "
+                    "the labels in the image."
+                ),
+                "images": [b64],
+                "stream": False,
+                # Confirmed live: Ollama's default num_ctx (4096) for this
+                # model left almost no room for a real answer -- the
+                # rendered image alone consumed 4054 of those 4096 tokens,
+                # so the response got cut off after one sentence
+                # (done_reason "length", not an error). Raising it to 8192
+                # let the same call finish naturally (done_reason "stop")
+                # with a full multi-paragraph description.
+                "options": {"num_ctx": config.VLM_CONTEXT_TOKENS},
+            },
+            timeout=config.VLM_TIMEOUT_SECONDS,
+        )
+        resp.raise_for_status()
+    except requests.exceptions.HTTPError:
+        # Same transient-reload behavior as generation.call_ollama() -- the
+        # model may need to be swapped into VRAM (it can't stay resident
+        # alongside OLLAMA_MODEL), and an occasional first request 500s
+        # while that happens.
+        if _retried:
+            return None
+        return _describe_image_with_vlm(image, _retried=True)
+    except Exception:
+        return None
+    return resp.json().get("response", "").strip() or None
+
+
 def _looks_like_real_text(text: str) -> bool:
     """A PDF's own text layer can be present but garbage -- confirmed live:
     a real equipment-layout diagram (drawn with a custom/broken font whose
@@ -253,6 +331,19 @@ def extract_pdf_pages(pdf_path: Path) -> list[Page]:
                     Line(text=t, bold=False, is_first_line_of_page=(j == 0), line_no=j)
                     for j, t in enumerate(t for t in ocr_text.splitlines() if t.strip())
                 ]
+
+            if _page_is_graphical(page):
+                vlm_description = _describe_page_image(pdf_path, i)
+                if vlm_description:
+                    label = "[Deskripsi diagram/gambar dari halaman ini]"
+                    text = f"{text}\n\n{label}\n{vlm_description}" if text.strip() else f"{label}\n{vlm_description}"
+                    lines = lines + [
+                        Line(text=t, bold=False, is_first_line_of_page=False, line_no=len(lines) + j)
+                        for j, t in enumerate(
+                            l for l in (label + "\n" + vlm_description).splitlines() if l.strip()
+                        )
+                    ]
+
             pages.append(
                 Page(
                     page_num=i, lines=lines, full_text=text,
@@ -684,7 +775,14 @@ def extract_ingest_data(pdf_path: Path) -> dict:
     """CPU-bound half of ingestion: PDF parsing, OCR, heading detection, and
     chunking -- no Chroma, no embedder, no sqlite. Touches nothing shared, so
     it's the half that's safe to fan out across worker processes; the actual
-    writes stay serialized (see write_ingest_data() and its callers)."""
+    writes stay serialized (see write_ingest_data() and its callers).
+
+    One exception: a page flagged graphical (see _page_is_graphical) makes a
+    network call to the local Ollama server for a VLM description. Still
+    safe from multiple worker processes -- Ollama itself serializes/queues
+    concurrent requests -- but slower than pure CPU work, and rare enough
+    (only genuinely diagram-heavy pages) that it doesn't change the overall
+    parallelization strategy."""
     source = pdf_path.name
     pages = extract_pdf_pages(pdf_path)
     _strip_repeating_page_lines(pages)

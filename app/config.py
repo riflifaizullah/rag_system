@@ -17,8 +17,9 @@ CHROMA_DIR = DATA_DIR / "chroma"
 SQLITE_DIR = DATA_DIR / "sqlite"
 SQLITE_PATH = SQLITE_DIR / "stk_online.db"
 SESSION_LOGS_DIR = DATA_DIR / "session_logs"
+CHUNK_LOGS_DIR = DATA_DIR / "chunk_logs"
 
-for _d in (DATA_DIR, CORPUS_DIR, CHROMA_DIR, SQLITE_DIR, SESSION_LOGS_DIR):
+for _d in (DATA_DIR, CORPUS_DIR, CHROMA_DIR, SQLITE_DIR, SESSION_LOGS_DIR, CHUNK_LOGS_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
 # Embeddings
@@ -42,6 +43,33 @@ OLLAMA_MODEL = "qwen3.5:9b"
 # starting (confirmed live: 2040ms vs 4ms for the identical request).
 OLLAMA_HOST = "http://127.0.0.1:11434"
 OLLAMA_TIMEOUT_SECONDS = 180
+
+# Vision-language model for diagram/image-heavy pages (see
+# ingestion._page_is_graphical) -- confirmed real via Ollama's official
+# library (qwen2.5vl:7b, 6.0GB, requires Ollama 0.7.0+; this machine runs
+# 0.34.3). Only ever invoked for a page structurally flagged as graphical,
+# never for ordinary text/OCR pages, since it can't stay loaded in VRAM at
+# the same time as OLLAMA_MODEL -- 6.0GB + ~6.6GB is over this GPU's 8GB
+# budget. Ollama swaps models on demand, so this only works because
+# ingestion and the live API server are never run at the same time (same
+# rule as never touching Chroma from both at once).
+VLM_ENABLED = True
+VLM_MODEL = "qwen2.5vl:7b"
+VLM_TIMEOUT_SECONDS = 300  # vision inference is slower than text-only generation
+# Confirmed live: Ollama's default num_ctx (4096) for this model left almost
+# no generation room -- a single rendered page image alone consumed 4054 of
+# those 4096 tokens, cutting the response off after one sentence. 8192 was
+# confirmed sufficient for a full multi-paragraph description to finish
+# naturally (done_reason "stop") on the real diagram this was tested against.
+VLM_CONTEXT_TOKENS = 8192
+# Provisional -- calibrated live against exactly one confirmed real diagram
+# page (69 vector curves, from pipe/valve icons drawn as actual vector
+# paths) versus an ordinary text/table page (6 curves, its many rects are
+# table-cell borders not diagram content) and two flat scanned pages (0
+# curves -- a scan is one raster image with no vector drawing at all, so
+# image presence/area alone would wrongly flag every scanned page too).
+# Needs revalidating against more real diagram pages as they turn up.
+VLM_MIN_CURVES = 20
 
 # Retrieval
 # Raised again for the new hardware (was 4 on the temporary laptop, then 6
