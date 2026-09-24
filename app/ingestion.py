@@ -113,14 +113,18 @@ def _extract_page_lines(page: "pdfplumber.page.Page") -> list[Line]:
 
 
 _OCR_LANG = "ind+eng"  # Indonesian first: the corpus is predominantly Indonesian legal/SOP text
-# Confirmed live: 200 DPI dropped a digit from a real date ("21 Agustus
-# 2025" -> "Agustus 2025", losing "21" entirely). Compared 200/300/400 DPI
-# on the exact same real page: 200 lost the digit, 300 lost the whole
-# BERLAKU TMT line, 400 read "21 Agustus 2025" correctly and completely.
-# Not a monotonic "higher is always better" result -- 400 is the verified
-# value for this real case, not a guess. Costs more OCR time per scanned
-# page; worth it on this hardware for the accuracy gain on real dates.
-_OCR_DPI = 400
+# REVERTED from 400 back to 200 -- confirmed live that 400 DPI, while it
+# did fix a real single-page digit-recognition case in isolation, caused
+# the real full-corpus ingest to hang: with INGEST_PARALLEL_WORKERS
+# workers each rendering at 400 DPI simultaneously (4x the pixels of 200
+# DPI per page), 15 concurrent pdftoppm processes sat for 7+ hours
+# accumulating under 1.5 CPU-seconds each -- a resource-contention stall
+# under real concurrency, not something the earlier one-page-at-a-time
+# tests could have caught. 200 DPI is the value verified safe across this
+# entire project's testing at real parallelism; raising it again would
+# need pairing with reduced parallelism and a real concurrent-load test,
+# not just a single-page check, before trusting it in a real run again.
+_OCR_DPI = 200
 
 
 def _preprocess_for_ocr(image: "Image.Image") -> "Image.Image":
