@@ -71,6 +71,15 @@ VLM_CONTEXT_TOKENS = 8192
 # Needs revalidating against more real diagram pages as they turn up.
 VLM_MIN_CURVES = 20
 
+# Tesseract OSD's own confidence for a detected rotation -- confirmed live
+# that trusting OSD unconditionally can flip an already-upright page into
+# gibberish when OSD's guess is a near coin-flip (0.53 confidence ruined a
+# real cover page), versus a genuinely correct rotation detection (4.71
+# confidence, the real rotated diagram). A wide, clean gap between the two
+# real examples calibrated this threshold; only revisit if more real
+# examples land closer to it than these two did.
+OCR_ORIENTATION_MIN_CONFIDENCE = 2.0
+
 # Retrieval
 # Raised again for the new hardware (was 4 on the temporary laptop, then 6
 # after confirming live that correct-but-lower-scoring chunks sometimes

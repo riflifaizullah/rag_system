@@ -184,16 +184,31 @@ def _correct_orientation(image: "Image.Image") -> "Image.Image":
     out as near-total gibberish) gets read wrong from the start otherwise.
     Tesseract's Orientation and Script Detection (OSD) is a separate,
     cheaper pass that estimates the rotation before the real recognition
-    attempt runs, so the image gets corrected instead of just misread."""
+    attempt runs, so the image gets corrected instead of just misread.
+
+    Confirmed live this can also make things WORSE: an already-upright,
+    perfectly ordinary cover page got OSD's rotate=180 applied anyway,
+    flipping it into gibberish (a correct page's OCR confidence dropped
+    from the 80s/90s typical of this template to 40.0, extracted text
+    became reversed/mirrored) -- because OSD's own confidence for that
+    guess was only 0.53, essentially a coin flip, and it also misidentified
+    the script as "Greek" (also low-confidence noise). The genuinely
+    correct rotation case (the real rotated diagram) had orientation_conf
+    4.71 -- a wide, clean gap from 0.53. Only trust OSD's rotation when
+    it's actually confident; otherwise leave the page alone rather than
+    risk turning a working page into garbage."""
     try:
         osd = pytesseract.image_to_osd(image, output_type=pytesseract.Output.DICT)
         rotation = osd.get("rotate", 0)
+        confidence = osd.get("orientation_conf", 0)
     except Exception:
-        # OSD can fail outright on near-blank/low-content/low-confidence
-        # pages -- treat as "no rotation detected" rather than failing OCR
-        # for the whole page over a failed pre-check.
+        # OSD can fail outright on near-blank/low-content pages -- treat as
+        # "no rotation detected" rather than failing OCR for the whole page
+        # over a failed pre-check.
         return image
-    return image.rotate(-rotation, expand=True) if rotation else image
+    if not rotation or confidence < config.OCR_ORIENTATION_MIN_CONFIDENCE:
+        return image
+    return image.rotate(-rotation, expand=True)
 
 
 def _ocr_page(pdf_path: Path, page_num: int) -> tuple[str, Optional[float]]:

@@ -158,6 +158,35 @@ def document_preview(filename: str):
     }
 
 
+@app.get("/documents/{filename}/chunks")
+def document_chunks(filename: str):
+    """Live view of exactly what's currently indexed for this document --
+    reads straight from Chroma on every call, so it always reflects the
+    real current state (no separate dump script or stale file to go stale)."""
+    _validated_path(filename)
+
+    def _fetch():
+        collection = retrieval.get_collection()
+        fetched = collection.get(where={"source": filename}, include=["documents", "metadatas"])
+        docs = fetched.get("documents", [])
+        metas = fetched.get("metadatas", [])
+        ordered = sorted(
+            zip(metas, docs), key=lambda pair: (pair[0].get("page", 0), pair[0].get("chunk_index", 0))
+        )
+        return [
+            {
+                "page": meta.get("page"),
+                "chunk_index": meta.get("chunk_index"),
+                "ocr_confidence": meta.get("ocr_confidence"),
+                "text": text,
+            }
+            for meta, text in ordered
+        ]
+
+    chunks = retrieval.run_on_chroma_thread(_fetch)
+    return {"filename": filename, "chunk_count": len(chunks), "chunks": chunks}
+
+
 @app.get("/documents/{filename}/download")
 def document_download(filename: str):
     path = _validated_path(filename)
