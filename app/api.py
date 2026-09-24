@@ -70,7 +70,13 @@ def ask(req: AskRequest):
     )
     results = [QuestionAnswer(**r) for r in sub_results]
 
-    combined_answer = "\n\n".join(f"Q: {r.question}\nA: {r.answer}" for r in results)
+    # Store exactly what the live UI actually shows (see streamlit_app.py's
+    # submit_question(), which joins just r["answer"] with no "Q:/A:"
+    # prefix) -- confirmed live this drifted apart: a reloaded session
+    # showed a redundant "Q: ... A: ..." prefix on every turn that was
+    # never present when the answer was first rendered, because this line
+    # baked in formatting the live path never had.
+    combined_answer = "\n\n".join(r.answer for r in results)
     database.save_message(session_id, "assistant", combined_answer)
 
     return AskResponse(
@@ -93,7 +99,12 @@ def sources():
 
 
 def _infer_doc_type(filename: str) -> str:
-    return "contract" if filename.lower().startswith("kontrak") else "sop"
+    """Reads the document's own real category label from its content
+    (see retrieval.get_document_type_label) instead of guessing from the
+    filename -- the old version called anything not literally starting
+    with "kontrak" a "sop", which was wrong for every TKO/TKI/TKPA/Pedoman/
+    letter/contract/technical-doc actually in this corpus."""
+    return retrieval.get_document_type_label(filename)
 
 
 def _validated_path(filename: str):

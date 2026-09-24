@@ -313,6 +313,9 @@ def _describe_image_with_vlm(image: "Image.Image", _retried: bool = False) -> Op
     return resp.json().get("response", "").strip() or None
 
 
+_CID_ARTIFACT_RE = re.compile(r"\(cid:\d+\)")
+
+
 def _looks_like_real_text(text: str) -> bool:
     """A PDF's own text layer can be present but garbage -- confirmed live:
     a real equipment-layout diagram (drawn with a custom/broken font whose
@@ -323,12 +326,26 @@ def _looks_like_real_text(text: str) -> bool:
     than if the page had no text layer at all. A real text layer is
     overwhelmingly printable characters; a broken one is dominated by
     control/non-printable bytes, so that ratio is the structural signal
-    (not particular characters or words) used to tell them apart."""
+    (not particular characters or words) used to tell them apart.
+
+    A second, different broken-font failure mode passes that printable-
+    ratio check while still being unusable -- confirmed live: math-typeset
+    content (LaTeX-style equations, a custom math font) extracted as
+    literal "(cid:N)" glyph-ID artifacts mixed with stray digits, which are
+    >90% ordinary printable ASCII (parentheses/digits/colons) even though
+    the actual equation structure is destroyed. "(cid:" is an internal
+    marker pdfplumber/pdfminer emits specifically for "this font's
+    character code has no real Unicode mapping" -- it is never legitimate
+    content in any real document, in any language, so its presence at all
+    is a reliable, general signal of the same underlying broken-font
+    problem, not specific to math or any one document."""
     stripped = text.strip()
     if not stripped:
         return False
     printable = sum(1 for ch in stripped if ch.isprintable() or ch in "\n\t")
-    return printable / len(stripped) > 0.9
+    if printable / len(stripped) <= 0.9:
+        return False
+    return not _CID_ARTIFACT_RE.search(stripped)
 
 
 def extract_pdf_pages(pdf_path: Path) -> list[Page]:

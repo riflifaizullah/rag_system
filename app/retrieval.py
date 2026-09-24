@@ -691,6 +691,43 @@ def get_headings_for(sources: list[str]) -> list[dict]:
     return database.get_headings_for_sources(sources)
 
 
+def get_document_type_label(source: str) -> str:
+    """A document's own real category label (e.g. "TATA KERJA ORGANISASI",
+    "TATA KERJA INDIVIDU", "TATA KERJA PENGGUNAAN ALAT", "PEDOMAN") is
+    reliably the first non-empty line of its own page 1 -- confirmed live
+    across every real document type seen in this corpus (SOPs, individual
+    procedures, equipment manuals, contracts, letters). Reading it directly
+    from the document's own content replaces guessing from the filename
+    (api.py's old _infer_doc_type() called anything not starting with
+    "kontrak" a "sop", which was simply wrong for every other real
+    document type/naming convention actually in this corpus). Returns
+    whatever the document's own first line says, verbatim -- not
+    classified into a fixed category set, since a hardcoded category enum
+    would just be the same kind of corpus-specific guess in a different
+    form."""
+    collection = get_collection()
+    fetched = collection.get(
+        where={"$and": [{"source": source}, {"page": 1}]}, include=["documents", "metadatas"]
+    )
+    docs = fetched.get("documents", [])
+    metas = fetched.get("metadatas", [])
+    if not docs:
+        return "Tidak diketahui"
+    ordered = sorted(zip(metas, docs), key=lambda pair: pair[0].get("chunk_index", 0))
+    lines = [l.strip() for l in ordered[0][1].splitlines() if l.strip()]
+    if not lines:
+        return "Tidak diketahui"
+    # A cover page's very first OCR'd line is sometimes 1-2 characters of
+    # logo/glyph noise (confirmed live on a real scanned cover) rather than
+    # the real category text a couple of lines down -- skip clearly-too-
+    # short lines first, but still return something rather than nothing if
+    # every line on the page happens to be short.
+    for line in lines:
+        if len(line) >= 5:
+            return line
+    return lines[0]
+
+
 def get_full_document_text(source: str) -> str:
     """Reconstructs (approximately) the full document from its stored
     chunks, ordered by (page, chunk_index) -- used by the full-document
