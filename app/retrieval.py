@@ -51,6 +51,7 @@ from typing import Optional
 
 import chromadb
 import numpy as np
+import torch
 from rank_bm25 import BM25Okapi
 from sentence_transformers import CrossEncoder, SentenceTransformer
 
@@ -84,23 +85,30 @@ def run_on_chroma_thread(fn, *args, **kwargs):
     return _chroma_thread.submit(fn, *args, **kwargs).result()
 
 
+_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+
 def get_embedder() -> SentenceTransformer:
     global _embedder
     if _embedder is None:
-        _embedder = SentenceTransformer(config.EMBEDDING_MODEL)
+        _embedder = SentenceTransformer(config.EMBEDDING_MODEL, device=_DEVICE)
     return _embedder
 
 
 def get_reranker() -> Optional[CrossEncoder]:
-    """Lazily loads the cross-encoder. On this 8GB-RAM laptop, if it can't
-    load (OOM, download failure), retrieval must still work -- degrade to
+    """Lazily loads the cross-encoder. Explicit device=_DEVICE because,
+    unlike SentenceTransformer, CrossEncoder was confirmed live to NOT
+    reliably auto-select CUDA on its own -- it silently loaded onto CPU here
+    even with a working CUDA-enabled torch and an available GPU, which
+    matters since reranking runs on every retrieval call. If loading still
+    fails (OOM, download failure), retrieval must still work -- degrade to
     embedding-only ranking rather than fail the request."""
     global _reranker, _reranker_unavailable
     if _reranker_unavailable:
         return None
     if _reranker is None:
         try:
-            _reranker = CrossEncoder(config.RERANK_MODEL)
+            _reranker = CrossEncoder(config.RERANK_MODEL, device=_DEVICE)
         except Exception:
             _reranker_unavailable = True
             return None
