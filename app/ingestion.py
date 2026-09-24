@@ -200,13 +200,31 @@ def _ocr_page(pdf_path: Path, page_num: int) -> tuple[str, Optional[float]]:
         return "", None
 
 
+def _looks_like_real_text(text: str) -> bool:
+    """A PDF's own text layer can be present but garbage -- confirmed live:
+    a real equipment-layout diagram (drawn with a custom/broken font whose
+    character codes don't map to real glyphs) came back from pdfplumber as
+    a non-empty string of pure \\x01 control-character bytes. bool(text.
+    strip()) alone treats that as a valid text layer and skips the OCR
+    fallback entirely, losing even the diagram's visible labels -- worse
+    than if the page had no text layer at all. A real text layer is
+    overwhelmingly printable characters; a broken one is dominated by
+    control/non-printable bytes, so that ratio is the structural signal
+    (not particular characters or words) used to tell them apart."""
+    stripped = text.strip()
+    if not stripped:
+        return False
+    printable = sum(1 for ch in stripped if ch.isprintable() or ch in "\n\t")
+    return printable / len(stripped) > 0.9
+
+
 def extract_pdf_pages(pdf_path: Path) -> list[Page]:
     pages: list[Page] = []
     with pdfplumber.open(str(pdf_path)) as pdf:
         for i, page in enumerate(pdf.pages, start=1):
             lines = _extract_page_lines(page)
             text = "\n".join(l.text for l in lines)
-            had_text_layer = bool(text.strip())
+            had_text_layer = _looks_like_real_text(text)
             ocr_confidence = None
             if not had_text_layer:
                 ocr_text, ocr_confidence = _ocr_page(pdf_path, i)
@@ -672,6 +690,41 @@ def extract_ingest_data(pdf_path: Path) -> dict:
     }
 
 
+def _chunk_log_records(all_chunks: list[dict], ocr_confidence_by_page: dict[int, Optional[float]]) -> list[dict]:
+    return [
+        {
+            "page": c["page"],
+            "chunk_index": c["chunk_index"],
+            "ocr_confidence": ocr_confidence_by_page.get(c["page"]),
+            "text": c["text"],
+        }
+        for c in sorted(all_chunks, key=lambda c: (c["page"], c["chunk_index"]))
+    ]
+
+
+def write_chunk_log_md(source: str, records: list[dict]) -> Path:
+    """Human-readable per-document Markdown log under data/chunk_logs/,
+    rewritten in full every time this source is (re-)ingested -- same idea
+    as database._write_session_log_file for chat history: Chroma stays the
+    real source of truth, this is just an always-current, easy-to-open view
+    of exactly what ingestion produced, for checking OCR/chunking quality
+    without querying anything."""
+    config.CHUNK_LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = config.CHUNK_LOGS_DIR / f"{source}.md"
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(f"# {source}\n\n{len(records)} chunks\n\n")
+        for r in records:
+            conf = r["ocr_confidence"]
+            conf_note = "not OCR'd" if conf is None or conf < 0 else f"OCR confidence {conf:.1f}"
+            f.write(f"## Page {r['page']}, chunk {r['chunk_index']} ({conf_note})\n\n")
+            f.write("```\n" + r["text"].strip() + "\n```\n\n")
+    return out_path
+
+
+def remove_chunk_log(source: str) -> None:
+    (config.CHUNK_LOGS_DIR / f"{source}.md").unlink(missing_ok=True)
+
+
 def write_ingest_data(pdf_path: Path, data: dict, collection, embedder) -> int:
     """Chroma/sqlite-writing half of ingestion. Must run on whatever single
     thread the rest of the app already funnels Chroma access through (see
@@ -707,6 +760,9 @@ def write_ingest_data(pdf_path: Path, data: dict, collection, embedder) -> int:
             for c in all_chunks
         ]
         collection.add(ids=ids, embeddings=embeddings, documents=texts, metadatas=metadatas)
+        write_chunk_log_md(source, _chunk_log_records(all_chunks, ocr_confidence_by_page))
+    else:
+        remove_chunk_log(source)
 
     database.upsert_document(source, content_hash(pdf_path))
     return len(all_chunks)
@@ -722,4 +778,5 @@ def remove_file(source: str, collection) -> None:
         collection.delete(where={"source": source})
     except Exception:
         pass
+    remove_chunk_log(source)
     database.delete_document(source)
