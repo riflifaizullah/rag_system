@@ -15,7 +15,12 @@ from app import config, database, ingestion, retrieval
 _scheduler: BackgroundScheduler | None = None
 
 
-def sync_once(corpus_dir: Path = config.CORPUS_DIR) -> dict:
+def sync_once(corpus_dir: Path = config.CORPUS_DIR, verbose: bool = False) -> dict:
+    """verbose=True prints per-file progress as it happens -- off by default
+    so the scheduled background job and the /sync API endpoint (which call
+    this every run) don't spam server logs; the manual `python -m
+    app.sync_documents` CLI entrypoint below turns it on, since that's the
+    one place a human is actually watching the terminal live."""
     collection = retrieval.get_collection()
     embedder = retrieval.get_embedder()
 
@@ -37,6 +42,14 @@ def sync_once(corpus_dir: Path = config.CORPUS_DIR) -> dict:
         else:
             unchanged_files.append(name)
 
+    to_delete = known_sources - set(disk_files.keys())
+    if verbose:
+        print(
+            f"Found {len(new_files)} new, {len(updated_files)} updated, "
+            f"{len(unchanged_files)} unchanged, {len(to_delete)} to delete.",
+            flush=True,
+        )
+
     # PDF parsing/OCR (extract_ingest_data) is CPU-bound and per-file
     # independent, so it's fanned out across worker processes. The actual
     # writes (write_ingest_data) touch Chroma/the embedder/sqlite, which
@@ -44,12 +57,20 @@ def sync_once(corpus_dir: Path = config.CORPUS_DIR) -> dict:
     # _chroma_thread comment on the cross-thread ChromaDB bug) -- so results
     # are written back sequentially here in the main process as each
     # extraction finishes, never in parallel.
+    total = len(to_ingest)
+    done = 0
     if len(to_ingest) == 1:
         ((name, path),) = to_ingest.items()
+        if verbose:
+            print(f"[1/1] Ingesting {name} ...", flush=True)
         data = ingestion.extract_ingest_data(path)
-        ingestion.write_ingest_data(path, data, collection, embedder)
+        n_chunks = ingestion.write_ingest_data(path, data, collection, embedder)
+        if verbose:
+            print(f"[1/1] Done: {name} ({n_chunks} chunks)", flush=True)
     elif to_ingest:
         workers = min(config.INGEST_PARALLEL_WORKERS, len(to_ingest))
+        if verbose:
+            print(f"Extracting {total} files across {workers} worker processes ...", flush=True)
         with ProcessPoolExecutor(max_workers=workers) as pool:
             futures = {
                 pool.submit(ingestion.extract_ingest_data, path): (name, path)
@@ -58,13 +79,21 @@ def sync_once(corpus_dir: Path = config.CORPUS_DIR) -> dict:
             for future in as_completed(futures):
                 name, path = futures[future]
                 data = future.result()
-                ingestion.write_ingest_data(path, data, collection, embedder)
+                n_chunks = ingestion.write_ingest_data(path, data, collection, embedder)
+                done += 1
+                if verbose:
+                    print(f"[{done}/{total}] Ingested: {name} ({n_chunks} chunks)", flush=True)
 
-    for source in known_sources - set(disk_files.keys()):
+    for source in to_delete:
+        if verbose:
+            print(f"Removing (no longer on disk): {source}", flush=True)
         ingestion.remove_file(source, collection)
         deleted_files.append(source)
 
     retrieval.invalidate_sources_cache()
+
+    if verbose:
+        print("Sync complete.", flush=True)
 
     return {
         "new": new_files,
@@ -105,4 +134,5 @@ def stop_scheduler() -> None:
 
 if __name__ == "__main__":
     database.init_db()
-    print(json.dumps(sync_once(), indent=2, ensure_ascii=False))
+    result = sync_once(verbose=True)
+    print(json.dumps(result, indent=2, ensure_ascii=False))
