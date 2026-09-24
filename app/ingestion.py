@@ -174,6 +174,25 @@ def _reconstruct_text_from_ocr_data(data: dict) -> str:
     return "\n".join(output_lines)
 
 
+def _correct_orientation(image: "Image.Image") -> "Image.Image":
+    """The main OCR pass assumes upright, left-to-right text -- a page whose
+    real content is rotated 90/180/270 degrees (confirmed live: a real
+    equipment-layout diagram laid out in landscape on a portrait page came
+    out as near-total gibberish) gets read wrong from the start otherwise.
+    Tesseract's Orientation and Script Detection (OSD) is a separate,
+    cheaper pass that estimates the rotation before the real recognition
+    attempt runs, so the image gets corrected instead of just misread."""
+    try:
+        osd = pytesseract.image_to_osd(image, output_type=pytesseract.Output.DICT)
+        rotation = osd.get("rotate", 0)
+    except Exception:
+        # OSD can fail outright on near-blank/low-content/low-confidence
+        # pages -- treat as "no rotation detected" rather than failing OCR
+        # for the whole page over a failed pre-check.
+        return image
+    return image.rotate(-rotation, expand=True) if rotation else image
+
+
 def _ocr_page(pdf_path: Path, page_num: int) -> tuple[str, Optional[float]]:
     """Returns (text, average_word_confidence). Confidence is a distinct,
     visible signal from LLM-fabrication risk -- surfaced via answer logging
@@ -186,7 +205,8 @@ def _ocr_page(pdf_path: Path, page_num: int) -> tuple[str, Optional[float]]:
         )
         if not images:
             return "", None
-        processed = _preprocess_for_ocr(images[0])
+        oriented = _correct_orientation(images[0])
+        processed = _preprocess_for_ocr(oriented)
 
         data = pytesseract.image_to_data(processed, lang=_OCR_LANG, output_type=pytesseract.Output.DICT)
         text = _reconstruct_text_from_ocr_data(data)
