@@ -459,19 +459,43 @@ def generate_answer(
     # Full-document fallback: a broad question (no specific clause/section
     # identifier referenced) about exactly one small named document skips
     # retrieval and gets the whole document injected instead -- guarantees
-    # completeness regardless of chunk-level retrieval quality. Only when
-    # the estimated size clearly fits this model's actual running context
-    # window (4096 tokens, not qwen2.5's larger architecture max) with real
-    # margin for the prompt template and response; otherwise falls through
-    # to the normal retrieval path rather than silently truncating.
+    # completeness regardless of chunk-level retrieval quality. Two
+    # conditions must both hold: it must fit this model's actual running
+    # context window (real margin for the prompt template and response),
+    # AND it must be small enough that full injection is actually reliable
+    # (see config.FULL_DOC_FALLBACK_MAX_CHARS -- confirmed live that
+    # "fits in context" isn't the same as "small enough to reason over
+    # accurately"; a document can technically fit while still being too
+    # large for the model to reliably find one specific fact inside it).
+    # Otherwise falls through to the normal retrieval path, which finds
+    # the single most relevant passage directly instead of confusing it
+    # with everything else in a large document.
     if len(named_sources) == 1 and not _IDENTIFIER_PATTERN.search(question):
         full_text = retrieval.get_full_document_text(named_sources[0])
-        if full_text and _fits_in_context(full_text):
+        if (
+            full_text
+            and len(full_text) <= config.FULL_DOC_FALLBACK_MAX_CHARS
+            and _fits_in_context(full_text)
+        ):
             prompt = build_full_document_prompt(question, named_sources[0], full_text)
             answer, prompt_tokens, response_tokens = call_ollama(
                 prompt, timeout=config.OLLAMA_FULL_DOC_TIMEOUT_SECONDS
             )
-            answer += _build_footer(["Dihasilkan dari keseluruhan isi dokumen, bukan potongan teks."])
+            # Same fabrication check the normal retrieval path already
+            # runs (see below) -- confirmed live this path was missing it
+            # entirely: a full-document answer fabricated a plausible-
+            # looking technical detail ("HTTP 401") that wasn't actually
+            # in the document. Applies to any claimed identifier/code
+            # against this document's own real headings, not specific to
+            # any one document or fact type.
+            headings = retrieval.get_headings_for(named_sources)
+            unverified = unverified_identifiers(answer, headings)
+            footer_notes = ["Dihasilkan dari keseluruhan isi dokumen, bukan potongan teks."]
+            if unverified:
+                footer_notes.append(
+                    f"Catatan: {', '.join(unverified)} belum terverifikasi terhadap dokumen sumber."
+                )
+            answer += _build_footer(footer_notes)
             database.log_answer(
                 session_id, question, answer, None, looks_like_hedging(answer),
                 looks_like_refusal(answer), False, [],

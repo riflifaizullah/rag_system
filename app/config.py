@@ -131,19 +131,31 @@ MULTI_SOURCE_RERANK_GAP = 3.0
 # questions, skip retrieval entirely and inject the whole document when it
 # clearly fits the model's context window, guaranteeing completeness
 # regardless of chunk-level retrieval quality.
-# IMPORTANT -- VERIFY THIS ON THE NEW MACHINE before trusting it: 4096 was
-# confirmed via `ollama ps` as what Ollama actually ran qwen2.5:3b at on
-# the old laptop, not assumed. qwen3.5:9b's architecture supports up to
-# 256K, but Ollama's actual runtime context depends on its default num_ctx
-# for this model/available VRAM, which could be much smaller than the
-# architecture max -- this 16384 is an optimistic but UNVERIFIED starting
-# guess, not confirmed the same rigorous way. Check `ollama ps` after a
-# real query on the new machine and correct this value to match reality.
-# Using a too-large number here silently overflows the real running
-# context instead of falling back safely.
+# Verified live on this machine (confirmed via `ollama ps` showing
+# CONTEXT 16384 while call_ollama's explicit num_ctx passthrough is
+# active) -- this is now the model's real running context, not an
+# assumption. qwen3.5:9b's architecture supports up to 256K; 16384 is a
+# deliberately smaller, confirmed-working value for this GPU's VRAM
+# budget, not a guess.
 OLLAMA_CONTEXT_TOKENS = 16384
 FULL_DOC_PROMPT_MARGIN_TOKENS = 1200  # system prompt + question + generation headroom
 CHARS_PER_TOKEN_ESTIMATE = 4  # rough heuristic, no tokenizer call needed for a fast fit-check
+
+# "Fits in context" alone isn't a good enough bar for actually injecting a
+# whole document -- confirmed live: a 60-page/135,704-char document
+# answered a specific date question wrong (confused the real effective
+# date with a different date elsewhere in the same document), while every
+# document under ~15,342 chars in the same test answered correctly via
+# this same full-document path. A small local model can technically fit
+# a large document in its context window without being able to reliably
+# find one specific fact inside it -- normal chunk retrieval (which finds
+# the single most relevant passage directly) is more reliable for large
+# documents even though full-injection would technically fit. This cap
+# applies to any PDF, not a specific document -- above it, generate_answer
+# falls through to normal retrieval instead of full-document injection.
+# Calibrated with a wide, real margin on both sides (15,342 worked,
+# 135,704 didn't); revisit if a real case lands closer to the gap.
+FULL_DOC_FALLBACK_MAX_CHARS = 25000
 
 # Ambiguity detection: if the top-2 distinct-source retrieval scores are
 # within this gap, and no document was explicitly named, ask for clarification.
