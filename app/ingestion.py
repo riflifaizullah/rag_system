@@ -260,10 +260,35 @@ def _correct_orientation(image: "Image.Image") -> "Image.Image":
     return image.rotate(-rotation, expand=True)
 
 
+def _run_tesseract(processed: "Image.Image", psm: Optional[int] = None) -> tuple[str, Optional[float]]:
+    kwargs = {}
+    if psm is not None:
+        kwargs["config"] = f"--psm {psm}"
+    data = pytesseract.image_to_data(
+        processed, lang=_OCR_LANG, output_type=pytesseract.Output.DICT,
+        timeout=config.OCR_RECOGNIZE_TIMEOUT_SECONDS, **kwargs,
+    )
+    text = _reconstruct_text_from_ocr_data(data)
+    confidences = [float(c) for c in data.get("conf", []) if c not in ("-1", -1) and float(c) >= 0]
+    avg_confidence = round(sum(confidences) / len(confidences), 1) if confidences else None
+    return text, avg_confidence
+
+
 def _ocr_page(pdf_path: Path, page_num: int) -> tuple[str, Optional[float]]:
     """Returns (text, average_word_confidence). Confidence is a distinct,
     visible signal from LLM-fabrication risk -- surfaced via answer logging
-    rather than silently folded into ordinary retrieval/generation."""
+    rather than silently folded into ordinary retrieval/generation.
+
+    Runs Tesseract's default page segmentation (PSM 3) plus PSM 6 ("assume a
+    single uniform block of text") and keeps whichever result has the higher
+    average word confidence. Confirmed live: PSM 3 alone drops digits on
+    dense title-block tables (e.g. "21 Agustus 2025" -> "2 Agustus 2025"),
+    which PSM 6 reads correctly -- but PSM 6 alone produces total garbage on
+    decorative, graphic-heavy cover pages where PSM 3 is fine. Their own
+    confidence scores reliably separate these cases on every real page
+    tested (both the fix and the regression cases), so neither mode is
+    trusted unconditionally. Costs a second recognize pass per page, bounded
+    by the same OCR_RECOGNIZE_TIMEOUT_SECONDS as the first."""
     if not _OCR_AVAILABLE:
         return "", None
     try:
@@ -276,13 +301,11 @@ def _ocr_page(pdf_path: Path, page_num: int) -> tuple[str, Optional[float]]:
         oriented = _correct_orientation(images[0])
         processed = _preprocess_for_ocr(oriented)
 
-        data = pytesseract.image_to_data(
-            processed, lang=_OCR_LANG, output_type=pytesseract.Output.DICT,
-            timeout=config.OCR_RECOGNIZE_TIMEOUT_SECONDS,
-        )
-        text = _reconstruct_text_from_ocr_data(data)
-        confidences = [float(c) for c in data.get("conf", []) if c not in ("-1", -1) and float(c) >= 0]
-        avg_confidence = round(sum(confidences) / len(confidences), 1) if confidences else None
+        text, avg_confidence = _run_tesseract(processed)
+        if config.OCR_FALLBACK_PSM:
+            alt_text, alt_confidence = _run_tesseract(processed, psm=config.OCR_FALLBACK_PSM)
+            if alt_confidence is not None and (avg_confidence is None or alt_confidence > avg_confidence):
+                text, avg_confidence = alt_text, alt_confidence
 
         return text, avg_confidence
     except Exception:

@@ -170,6 +170,19 @@ OCR_RENDER_TIMEOUT_SECONDS = 60  # convert_from_path (Poppler pdftoppm)
 OCR_RECOGNIZE_TIMEOUT_SECONDS = 60  # pytesseract.image_to_data
 OCR_OSD_TIMEOUT_SECONDS = 15  # pytesseract.image_to_osd (a cheaper pre-pass)
 
+# Tesseract's default page-segmentation mode (PSM 3, fully-automatic) can
+# drop/merge characters on dense title-block tables -- confirmed live on a
+# real page: PSM 3 read "BERLAKU TMT : 2 Agustus 2025" (digit dropped),
+# while PSM 6 ("assume a single uniform block of text") read the same
+# image correctly as "21 Agustus 2025". But PSM 6 is NOT a safe blanket
+# replacement -- confirmed live on two decorative cover pages (logo/graphic-
+# heavy, sparse scattered text) it produced total garbage where PSM 3 read
+# fine. The two modes' own average word confidence reliably tells them
+# apart on all pages tested (both fix cases and both regression cases), so
+# _ocr_page runs both and keeps whichever result has the higher average
+# confidence, rather than trusting either PSM unconditionally.
+OCR_FALLBACK_PSM = 6
+
 # Ambiguity detection: if the top-2 distinct-source retrieval scores are
 # within this gap, and no document was explicitly named, ask for clarification.
 AMBIGUITY_SCORE_GAP = 0.03

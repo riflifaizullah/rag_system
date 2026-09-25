@@ -10,6 +10,11 @@ data/
 # Same reason: this transcript quotes real document content throughout.
 claude_session_archive/
 
+# Same reason: rendered page images and extracted text from real corpus
+# files used by testing/ scripts -- the scripts themselves are code and stay
+# tracked, but their output is real internal document content.
+result/
+
 # Python
 __pycache__/
 *.pyc
