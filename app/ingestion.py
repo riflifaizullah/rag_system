@@ -83,11 +83,26 @@ def _patch_pdfminer_cmap_range_bomb() -> None:
     that font are skipped rather than crashing, exactly like the existing
     _looks_like_real_text/CID-artifact check already treats a broken font
     as "fall back to OCR for this page" rather than trusting corrupted
-    output. Copies pdfminer.six's own do_keyword logic (fixed version:
-    3.0.x line) rather than wrapping it, since the unbounded loop is
-    *inside* the two range branches with no seam to intercept from
-    outside; every other keyword branch delegates to the original
-    unpatched method so behavior elsewhere is unchanged."""
+    output.
+
+    Second attempt (the per-font count cap above) STILL crashed with the
+    identical MemoryError on the next full-ingest attempt -- the count cap
+    bounds the number of dict *entries*, but not the *size* of each one.
+    The range/code operands (start_byte/end_byte/code) are bytes objects
+    taken straight from the file with no length check; a malformed operand
+    of unbounded byte length gets re-sliced (`operand[:-4]`) on every loop
+    iteration, and each slice COPIES that entire blob -- so one huge
+    operand exhausts memory in a handful of iterations, well before the
+    every-4096-iterations count check ever gets a chance to fire. Real CID/
+    code operands are 1-4 bytes, occasionally 8; fixed by also rejecting
+    any operand longer than _MAX_OPERAND_BYTES before entering the
+    expansion loop at all.
+
+    Copies pdfminer.six's own do_keyword logic (fixed version: 3.0.x line)
+    rather than wrapping it, since the unbounded loop is *inside* the two
+    range branches with no seam to intercept from outside; every other
+    keyword branch delegates to the original unpatched method so behavior
+    elsewhere is unchanged."""
     from pdfminer import cmapdb
 
     _MAX_CMAP_TOTAL = 200_000  # total entries per font, not per declaration
@@ -104,6 +119,15 @@ def _patch_pdfminer_cmap_range_bomb() -> None:
         d = getattr(cmap, "code2cid", None)
         return len(d) if d is not None else 0
 
+    # Real CID/code operands are 1-4 bytes, occasionally 8 -- confirmed live
+    # this needs its own bound distinct from the entry-count cap: a
+    # malformed operand of unbounded byte length gets re-sliced
+    # (`operand[:-4]`) on every one of up to thousands of loop iterations
+    # before the count cap even has a chance to fire, and each slice COPIES
+    # that entire blob, so a single huge operand exhausts memory in a
+    # handful of iterations regardless of how low the entry-count cap is.
+    _MAX_OPERAND_BYTES = 32
+
     def _patched_do_keyword(self, pos, token):
         if token is self.KEYWORD_ENDCIDRANGE:
             objs = [obj for (__, obj) in self.popall()]
@@ -114,7 +138,7 @@ def _patch_pdfminer_cmap_range_bomb() -> None:
                     continue
                 if not isinstance(cid, int):
                     continue
-                if len(start_byte) != len(end_byte):
+                if len(start_byte) != len(end_byte) or len(start_byte) > _MAX_OPERAND_BYTES:
                     continue
                 if start_byte[:-4] != end_byte[:-4]:
                     continue
@@ -137,7 +161,7 @@ def _patch_pdfminer_cmap_range_bomb() -> None:
                     break
                 if not isinstance(start_byte, bytes) or not isinstance(end_byte, bytes):
                     continue
-                if len(start_byte) != len(end_byte):
+                if len(start_byte) != len(end_byte) or len(start_byte) > _MAX_OPERAND_BYTES:
                     continue
                 start, end = cmapdb.nunpack(start_byte), cmapdb.nunpack(end_byte)
                 if end < start:
@@ -148,6 +172,8 @@ def _patch_pdfminer_cmap_range_bomb() -> None:
                             break
                         self.cmap.add_cid2unichr(cid, unicode_value)
                 elif isinstance(code, bytes):
+                    if len(code) > _MAX_OPERAND_BYTES:
+                        continue
                     var = code[-4:]
                     base = cmapdb.nunpack(var)
                     vlen = len(var)
