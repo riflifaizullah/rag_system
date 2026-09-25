@@ -216,7 +216,34 @@ SYNC_INTERVAL_MINUTES = 15
 # time. The actual Chroma/embedder/sqlite writes stay single-threaded
 # regardless (see ingestion.write_ingest_data and retrieval._chroma_thread),
 # so raising this only speeds up extraction, not the write phase.
-INGEST_PARALLEL_WORKERS = max(1, (os.cpu_count() or 4) - 1)
+#
+# Confirmed live this needs a RAM ceiling, not just a CPU-count one: on this
+# machine's 16GB total RAM, a plain cpu_count()-1 sizing gave 15 workers,
+# and the real full-corpus ingest (1149 files, a much larger and more varied
+# set than any small-batch test covered) repeatedly died with MemoryError
+# under that many concurrent OCR/VLM-heavy workers -- three fix attempts
+# chasing an unrelated, real-but-minor pdfminer edge case (a malformed
+# font's CMap parsing) never actually resolved it, because the true
+# bottleneck was system-wide memory exhaustion from over-parallelization,
+# not that code path specifically; the crash kept surfacing there only
+# because parsing an embedded CID font is common early per-page work that
+# happens to need a fresh allocation right when the system is already
+# critically low, not because that one file was uniquely broken. Budgets a
+# conservative 1GB/worker against currently-available RAM (via psutil,
+# reserving 2GB headroom for the main process's embedding model, Chroma/
+# sqlite, and Ollama) and takes whichever of that or the CPU-count bound is
+# lower, so a future higher-RAM machine still scales up by CPU count while
+# a tight one like this backs off automatically instead of repeating this
+# incident.
+try:
+    import psutil as _psutil
+
+    _available_gb = _psutil.virtual_memory().available / (1024**3)
+    _ram_worker_cap = max(1, int((_available_gb - 2) // 1))
+except Exception:
+    _ram_worker_cap = 4  # psutil unavailable -- fall back to a conservative fixed cap
+
+INGEST_PARALLEL_WORKERS = max(1, min((os.cpu_count() or 4) - 1, _ram_worker_cap))
 
 # API
 API_HOST = "0.0.0.0"
