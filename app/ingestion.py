@@ -53,6 +53,90 @@ except ImportError:  # pragma: no cover - OCR deps are optional on this laptop
     _OCR_AVAILABLE = False
 
 
+def _patch_pdfminer_cmap_range_bomb() -> None:
+    """pdfminer.six's CMapParser expands a font's embedded begincidrange/
+    beginbfrange declarations with a bare `for i in range(end - start + 1)`
+    and no sanity bound on the range size -- confirmed live: a real corpus
+    file (during the first full-ingest run, ~16/1149 files in) has a
+    corrupted/malformed embedded font whose CMap declares a range so large
+    that this loop tried to build a dict with an astronomical number of
+    entries, raising MemoryError and, because the OS ran out of RAM for
+    everyone, cascading MemoryErrors into unrelated sibling worker
+    processes' ordinary OCR subprocess calls at the same time -- looked at
+    first like a parallelism/memory-capacity problem, but is really a
+    single malformed file with no other symptom until this exact code path
+    runs. This is a known category of pdfminer weakness (unbounded
+    resource consumption on malformed CMap data), not specific to any one
+    document's content.
+
+    Patched to cap any single cidrange/bfrange declaration at
+    _MAX_CMAP_RANGE entries -- generous for any real font (a full BMP
+    subset is tens of thousands of glyphs, nowhere near this) -- and skip
+    (not crash on) anything larger, exactly like the existing
+    _looks_like_real_text/CID-artifact check already treats a broken font
+    as "fall back to OCR for this page" rather than trusting corrupted
+    output. Copies pdfminer.six's own do_keyword logic (fixed version:
+    3.0.x line) rather than wrapping it, since the unbounded loop is
+    *inside* the two range branches with no seam to intercept from
+    outside; every other keyword branch delegates to the original
+    unpatched method so behavior elsewhere is unchanged."""
+    from pdfminer import cmapdb
+
+    _MAX_CMAP_RANGE = 100_000
+    _original_do_keyword = cmapdb.CMapParser.do_keyword
+
+    def _patched_do_keyword(self, pos, token):
+        if token is self.KEYWORD_ENDCIDRANGE:
+            objs = [obj for (__, obj) in self.popall()]
+            for (start_byte, end_byte, cid) in cmapdb.choplist(3, objs):
+                if not isinstance(start_byte, bytes) or not isinstance(end_byte, bytes):
+                    continue
+                if not isinstance(cid, int):
+                    continue
+                if len(start_byte) != len(end_byte):
+                    continue
+                if start_byte[:-4] != end_byte[:-4]:
+                    continue
+                svar, evar = start_byte[-4:], end_byte[-4:]
+                start, end = cmapdb.nunpack(svar), cmapdb.nunpack(evar)
+                if end - start + 1 > _MAX_CMAP_RANGE or end < start:
+                    continue
+                vlen = len(svar)
+                for i in range(end - start + 1):
+                    x = start_byte[:-4] + cmapdb.struct.pack(">L", start + i)[-vlen:]
+                    self.cmap.add_cid2unichr(cid + i, x)
+            return
+
+        if token is self.KEYWORD_ENDBFRANGE:
+            objs = [obj for (__, obj) in self.popall()]
+            for (start_byte, end_byte, code) in cmapdb.choplist(3, objs):
+                if not isinstance(start_byte, bytes) or not isinstance(end_byte, bytes):
+                    continue
+                if len(start_byte) != len(end_byte):
+                    continue
+                start, end = cmapdb.nunpack(start_byte), cmapdb.nunpack(end_byte)
+                if end - start + 1 > _MAX_CMAP_RANGE or end < start:
+                    continue
+                if isinstance(code, list):
+                    for cid, unicode_value in zip(range(start, end + 1), code):
+                        self.cmap.add_cid2unichr(cid, unicode_value)
+                elif isinstance(code, bytes):
+                    var = code[-4:]
+                    base = cmapdb.nunpack(var)
+                    vlen = len(var)
+                    for i in range(end - start + 1):
+                        x = code[:-4] + cmapdb.struct.pack(">L", base + i)[-vlen:]
+                        self.cmap.add_cid2unichr(start + i, x)
+            return
+
+        return _original_do_keyword(self, pos, token)
+
+    cmapdb.CMapParser.do_keyword = _patched_do_keyword
+
+
+_patch_pdfminer_cmap_range_bomb()
+
+
 # ---------------------------------------------------------------------------
 # Page / line extraction
 # ---------------------------------------------------------------------------
