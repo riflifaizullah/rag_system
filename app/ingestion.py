@@ -460,9 +460,29 @@ def _page_is_graphical(page: "pdfplumber.page.Page") -> bool:
     image with zero vector drawing primitives, an ordinary table-heavy page
     has plenty of rects (cell borders) but few curves, while a real
     vector-drawn diagram (pipes, circular pump/valve icons) is dense with
-    curves. Curve count is therefore the discriminating signal -- image
-    presence/area alone would wrongly flag every scanned page too."""
-    return len(page.curves) >= config.VLM_MIN_CURVES
+    curves. Curve count alone is therefore the discriminating signal --
+    image presence/area alone would wrongly flag every scanned page too.
+
+    Confirmed live this raw count has a real false-positive mode: a signed/
+    export-optimized PDF ("...signedTS_opt.pdf") renders its TEXT as
+    outlined vector paths instead of embedded font glyphs (one small curve
+    per letter stroke) -- an ordinary page of plain text and a table came
+    back with 3148 curves, every single one under 7pt in both dimensions,
+    and got misflagged as a diagram on all 53 of its pages, each paying a
+    real ~80s+ VLM call for nothing (this is what stalled a real ingest run
+    for 40+ minutes on one file). A genuine diagram page's curves are drawn
+    at a size meant to be visually legible on the page (pipe/valve icon
+    shapes, tens to a hundred+ points): a real confirmed flowchart page had
+    85 total curves but 40 of them exceeded 15pt in either dimension, while
+    the false-positive text page had zero curves that large out of 3148.
+    Counting only curves above that size threshold is what actually
+    distinguishes "many tiny character-stroke curves" from "a few
+    real drawn shapes" -- raw count conflates the two."""
+    large_curves = sum(
+        1 for c in page.curves
+        if max(c.get("width", 0), c.get("height", 0)) > config.VLM_MIN_CURVE_SIZE_PT
+    )
+    return large_curves >= config.VLM_MIN_CURVES
 
 
 def _describe_page_image(pdf_path: Path, page_num: int) -> Optional[str]:

@@ -75,6 +75,17 @@ VLM_CONTEXT_TOKENS = 8192
 # image presence/area alone would wrongly flag every scanned page too).
 # Needs revalidating against more real diagram pages as they turn up.
 VLM_MIN_CURVES = 20
+# Confirmed live this threshold needs to apply to curve SIZE, not just raw
+# count: a signed/export-optimized PDF renders its text as outlined vector
+# paths (one tiny curve per letter stroke) instead of embedded font glyphs
+# -- an ordinary text-and-table page came back with 3148 curves this way
+# and was misflagged as a diagram on all 53 pages of that document, each
+# paying a real VLM call for nothing. A genuine diagram's curves (pipe/
+# valve icon shapes) are drawn large enough to be visually legible on the
+# page; a confirmed real flowchart page had 40 curves over 15pt in either
+# dimension, while the false-positive text page had zero that large out of
+# 3148. See ingestion._page_is_graphical.
+VLM_MIN_CURVE_SIZE_PT = 15
 
 # Tesseract OSD's own confidence for a detected rotation -- confirmed live
 # that trusting OSD unconditionally can flip an already-upright page into
