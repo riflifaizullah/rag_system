@@ -69,10 +69,18 @@ def _patch_pdfminer_cmap_range_bomb() -> None:
     resource consumption on malformed CMap data), not specific to any one
     document's content.
 
-    Patched to cap any single cidrange/bfrange declaration at
-    _MAX_CMAP_RANGE entries -- generous for any real font (a full BMP
-    subset is tens of thousands of glyphs, nowhere near this) -- and skip
-    (not crash on) anything larger, exactly like the existing
+    First attempt capped each single cidrange/bfrange declaration at
+    100,000 entries -- confirmed live that's NOT enough: the fix still
+    crashed with the same MemoryError on the very next full-ingest attempt,
+    because the cap was per-declaration, not per-font. A malformed font can
+    spread the same total blowup across many separate range blocks, each
+    individually under any single-declaration cap, that still sum to an
+    unbounded total. Fixed properly this time with a running total cap
+    across the whole font's cid2unichr/code2cid map (checked before
+    expanding each range, and re-checked every 4096 iterations inside the
+    loop so one block alone can't blow past it either) -- once the font's
+    total mapped-entry count hits _MAX_CMAP_TOTAL, remaining entries for
+    that font are skipped rather than crashing, exactly like the existing
     _looks_like_real_text/CID-artifact check already treats a broken font
     as "fall back to OCR for this page" rather than trusting corrupted
     output. Copies pdfminer.six's own do_keyword logic (fixed version:
@@ -82,13 +90,26 @@ def _patch_pdfminer_cmap_range_bomb() -> None:
     unpatched method so behavior elsewhere is unchanged."""
     from pdfminer import cmapdb
 
-    _MAX_CMAP_RANGE = 100_000
+    _MAX_CMAP_TOTAL = 200_000  # total entries per font, not per declaration
+    _CHECK_EVERY = 4096
     _original_do_keyword = cmapdb.CMapParser.do_keyword
+
+    def _map_size(cmap) -> int:
+        # FileUnicodeMap/FileCMap both keep their real data in cid2unichr or
+        # code2cid depending on which base class is in play; check whichever
+        # exists rather than assuming one.
+        d = getattr(cmap, "cid2unichr", None)
+        if d is not None:
+            return len(d)
+        d = getattr(cmap, "code2cid", None)
+        return len(d) if d is not None else 0
 
     def _patched_do_keyword(self, pos, token):
         if token is self.KEYWORD_ENDCIDRANGE:
             objs = [obj for (__, obj) in self.popall()]
             for (start_byte, end_byte, cid) in cmapdb.choplist(3, objs):
+                if _map_size(self.cmap) >= _MAX_CMAP_TOTAL:
+                    break
                 if not isinstance(start_byte, bytes) or not isinstance(end_byte, bytes):
                     continue
                 if not isinstance(cid, int):
@@ -99,10 +120,12 @@ def _patch_pdfminer_cmap_range_bomb() -> None:
                     continue
                 svar, evar = start_byte[-4:], end_byte[-4:]
                 start, end = cmapdb.nunpack(svar), cmapdb.nunpack(evar)
-                if end - start + 1 > _MAX_CMAP_RANGE or end < start:
+                if end < start:
                     continue
                 vlen = len(svar)
                 for i in range(end - start + 1):
+                    if i % _CHECK_EVERY == 0 and _map_size(self.cmap) >= _MAX_CMAP_TOTAL:
+                        break
                     x = start_byte[:-4] + cmapdb.struct.pack(">L", start + i)[-vlen:]
                     self.cmap.add_cid2unichr(cid + i, x)
             return
@@ -110,21 +133,27 @@ def _patch_pdfminer_cmap_range_bomb() -> None:
         if token is self.KEYWORD_ENDBFRANGE:
             objs = [obj for (__, obj) in self.popall()]
             for (start_byte, end_byte, code) in cmapdb.choplist(3, objs):
+                if _map_size(self.cmap) >= _MAX_CMAP_TOTAL:
+                    break
                 if not isinstance(start_byte, bytes) or not isinstance(end_byte, bytes):
                     continue
                 if len(start_byte) != len(end_byte):
                     continue
                 start, end = cmapdb.nunpack(start_byte), cmapdb.nunpack(end_byte)
-                if end - start + 1 > _MAX_CMAP_RANGE or end < start:
+                if end < start:
                     continue
                 if isinstance(code, list):
                     for cid, unicode_value in zip(range(start, end + 1), code):
+                        if _map_size(self.cmap) >= _MAX_CMAP_TOTAL:
+                            break
                         self.cmap.add_cid2unichr(cid, unicode_value)
                 elif isinstance(code, bytes):
                     var = code[-4:]
                     base = cmapdb.nunpack(var)
                     vlen = len(var)
                     for i in range(end - start + 1):
+                        if i % _CHECK_EVERY == 0 and _map_size(self.cmap) >= _MAX_CMAP_TOTAL:
+                            break
                         x = code[:-4] + cmapdb.struct.pack(">L", base + i)[-vlen:]
                         self.cmap.add_cid2unichr(start + i, x)
             return
