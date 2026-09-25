@@ -34,6 +34,12 @@ class QuestionAnswer(BaseModel):
     needs_clarification: bool = False
     candidate_documents: list[str] = Field(default_factory=list)
     sources: list[str] = Field(default_factory=list)
+    log_id: Optional[int] = Field(
+        default=None,
+        description="answer_log row id for this sub-answer, or null when the "
+        "turn has no single log entry to flag (e.g. a multi-document combined "
+        "answer). Pass to POST /flag/{log_id} to record a human review flag.",
+    )
 
 
 class AskResponse(BaseModel):
@@ -206,6 +212,11 @@ def document_download(filename: str):
 
 @app.post("/flag/{log_id}")
 def flag(log_id: int, category: str, corrected_answer: Optional[str] = None):
+    if category not in database.FLAG_CATEGORIES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"category must be one of {database.FLAG_CATEGORIES}",
+        )
     database.flag_answer(log_id, category, corrected_answer)
     return {"status": "flagged"}
 

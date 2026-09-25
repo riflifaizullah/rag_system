@@ -87,7 +87,9 @@ def init_db() -> None:
                 avg_ocr_confidence REAL,
                 low_ocr_confidence INTEGER NOT NULL DEFAULT 0,
                 prompt_tokens INTEGER,
-                response_tokens INTEGER
+                response_tokens INTEGER,
+                min_groundedness REAL,
+                sentence_groundedness TEXT
             );
             """
         )
@@ -101,6 +103,10 @@ def init_db() -> None:
             conn.execute("ALTER TABLE answer_log ADD COLUMN prompt_tokens INTEGER")
         if "response_tokens" not in existing_cols:
             conn.execute("ALTER TABLE answer_log ADD COLUMN response_tokens INTEGER")
+        if "min_groundedness" not in existing_cols:
+            conn.execute("ALTER TABLE answer_log ADD COLUMN min_groundedness REAL")
+        if "sentence_groundedness" not in existing_cols:
+            conn.execute("ALTER TABLE answer_log ADD COLUMN sentence_groundedness TEXT")
 
         # migration for DBs created before file_fingerprint existed
         existing_doc_cols = {row["name"] for row in conn.execute("PRAGMA table_info(documents)").fetchall()}
@@ -291,6 +297,18 @@ def list_sessions() -> list[dict]:
 
 LOW_OCR_CONFIDENCE_THRESHOLD = 60.0  # Tesseract mean word confidence is 0-100
 
+# Fixed vocabulary for human flags, not free-form text -- keeps the flagged
+# set analyzable later (group by category) instead of a pile of one-off
+# strings. Category is free-form in storage (no CHECK constraint), but every
+# writer (flag_answer's caller in app/api.py) is expected to send one of these.
+FLAG_CATEGORIES: tuple[str, ...] = (
+    "hallucinated_fact",
+    "wrongly_refused",
+    "bad_retrieval",
+    "incomplete_or_unclear",
+    "other",
+)
+
 
 def log_answer(
     session_id: Optional[str],
@@ -304,6 +322,8 @@ def log_answer(
     avg_ocr_confidence: Optional[float] = None,
     prompt_tokens: Optional[int] = None,
     response_tokens: Optional[int] = None,
+    min_groundedness: Optional[float] = None,
+    sentence_groundedness: Optional[list[dict]] = None,
 ) -> int:
     low_ocr_confidence = avg_ocr_confidence is not None and avg_ocr_confidence < LOW_OCR_CONFIDENCE_THRESHOLD
     with get_conn() as conn:
@@ -313,8 +333,8 @@ def log_answer(
                 session_id, question, answer, retrieval_confidence,
                 hedging_detected, refused, needs_clarification,
                 retrieved_context, created_at, avg_ocr_confidence, low_ocr_confidence,
-                prompt_tokens, response_tokens
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?, ?)
+                prompt_tokens, response_tokens, min_groundedness, sentence_groundedness
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?, ?, ?, ?)
             """,
             (
                 session_id,
@@ -329,6 +349,8 @@ def log_answer(
                 int(low_ocr_confidence),
                 prompt_tokens,
                 response_tokens,
+                min_groundedness,
+                json.dumps(sentence_groundedness or [], ensure_ascii=False),
             ),
         )
         row_id = cur.lastrowid

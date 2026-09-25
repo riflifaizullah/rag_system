@@ -158,14 +158,78 @@ def submit_question(question: str):
                 clarification = {"question": question, "candidates": r["candidate_documents"]}
                 break
         sources = sorted({s for r in data["results"] for s in r.get("sources", [])})
+        # Only a single-sub-question turn maps to exactly one answer_log row --
+        # a multi-question or multi-document-combined turn has several (or
+        # none), and there is no sound way to flag "this part of the combined
+        # answer" from one button, so the flag control only ever appears for
+        # the unambiguous single-log case.
+        log_ids = [r["log_id"] for r in data["results"] if r.get("log_id") is not None]
 
         st.session_state.messages.append(
-            {"role": "assistant", "content": answer_text, "clarification": clarification, "sources": sources}
+            {
+                "role": "assistant",
+                "content": answer_text,
+                "clarification": clarification,
+                "sources": sources,
+                "log_ids": log_ids,
+            }
         )
     except Exception as exc:
         st.session_state.messages.append(
             {"role": "assistant", "content": f"Permintaan gagal: {exc}", "clarification": None, "sources": []}
         )
+
+
+_FLAG_LABELS = {
+    "hallucinated_fact": "Informasi tidak akurat / mengada-ada",
+    "wrongly_refused": "Salah menolak menjawab",
+    "bad_retrieval": "Sumber yang diambil salah/tidak relevan",
+    "incomplete_or_unclear": "Jawaban tidak lengkap / tidak jelas",
+    "other": "Lainnya",
+}
+
+
+def _flag_answer(log_id: int, category: str, corrected_answer: str) -> bool:
+    try:
+        resp = requests.post(
+            f"{API_BASE}/flag/{log_id}",
+            params={"category": category, "corrected_answer": corrected_answer or None},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return True
+    except Exception:
+        return False
+
+
+def render_flag_control(log_id: int) -> None:
+    """Backend for this (database.flag_answer / POST /flag/{log_id}) already
+    existed and worked -- this was the missing piece: nothing in the UI ever
+    called it, so a human reviewer had no way to actually flag a bad answer.
+    Already-flagged rows just show a small confirmation instead of the form
+    again (tracked client-side in session_state; the row itself doesn't need
+    re-reading from the server for this)."""
+    flagged_ids = st.session_state.setdefault("flagged_log_ids", set())
+    if log_id in flagged_ids:
+        st.caption("🚩 Ditandai -- terima kasih atas masukannya.")
+        return
+
+    with st.popover("🚩 Tandai jawaban ini"):
+        category = st.selectbox(
+            "Apa yang salah dengan jawaban ini?",
+            options=list(_FLAG_LABELS.keys()),
+            format_func=lambda c: _FLAG_LABELS[c],
+            key=f"flagcat_{log_id}",
+        )
+        corrected = st.text_area(
+            "Jawaban yang seharusnya (opsional)", key=f"flagcorrect_{log_id}", height=80
+        )
+        if st.button("Kirim", key=f"flagsubmit_{log_id}", use_container_width=True):
+            if _flag_answer(log_id, category, corrected):
+                flagged_ids.add(log_id)
+                st.rerun()
+            else:
+                st.error("Gagal mengirim tanda. Coba lagi.")
 
 
 def _api_is_up() -> bool:
@@ -333,6 +397,9 @@ with col_chat:
             sources = msg.get("sources")
             if sources:
                 st.caption("📄 Sumber: " + ", ".join(sources))
+            log_ids = msg.get("log_ids") or []
+            if msg["role"] == "assistant" and len(log_ids) == 1:
+                render_flag_control(log_ids[0])
             clarification = msg.get("clarification")
             is_last = idx == len(st.session_state.messages) - 1
             if clarification and is_last:

@@ -33,12 +33,14 @@ HEDGING_PHRASES = [
 class ClarificationNeeded:
     message: str
     candidates: list[str] = field(default_factory=list)
+    log_id: Optional[int] = None
 
 
 @dataclass
 class Answer:
     text: str
     sources: list[str] = field(default_factory=list)
+    log_id: Optional[int] = None
 
 
 # ---------------------------------------------------------------------------
@@ -236,6 +238,70 @@ _MONTH_NAMES = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Sentence-level semantic groundedness (signal only, not enforced)
+# ---------------------------------------------------------------------------
+# unverified_identifiers() catches fabricated section/clause NUMBERS. It
+# cannot catch a fluent answer that bridges two genuinely-retrieved but
+# unrelated facts into a claim neither actually supports -- there is no
+# identifier or keyword to regex for there, only semantic distance between
+# what the answer claims and what the passages actually say. This mirrors
+# the older RAG SYSTEM's sentence_groundedness() (same technique: reuse the
+# retrieval embedder, no new dependency, no new model). Deliberately a
+# SIGNAL only, logged per answer for later review -- not a gate, since
+# nothing here has been validated as reliable enough to block an answer on.
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+_FOOTER_SPLIT_RE = re.compile(r"\n\n---\n")
+
+
+def _answer_sentences(answer_text: str) -> list[str]:
+    """The answer's own claims, split into sentences -- excludes the
+    footer this module appends (_build_footer: caveats + disclaimer), which
+    is app-generated boilerplate, not a model claim to score."""
+    body = _FOOTER_SPLIT_RE.split(answer_text or "", maxsplit=1)[0]
+    sentences: list[str] = []
+    for line in body.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        for s in _SENTENCE_SPLIT_RE.split(line):
+            s = s.strip()
+            if len(s.split()) >= 3:  # skip stray fragments/labels
+                sentences.append(s)
+    return sentences
+
+
+def sentence_groundedness(answer_text: str, hits: list[dict]) -> dict:
+    """Per-sentence semantic groundedness of `answer_text` against `hits` --
+    for each answer sentence, its score is the MAX cosine similarity against
+    any one retrieved passage (embeddings pre-normalized, so cosine
+    similarity is a plain dot product). Returns {"min": float|None,
+    "per_sentence": [{"sentence","score"}, ...]}; `min` is None when there
+    is nothing to score (empty answer or no hits) -- callers must not treat
+    None as "ungrounded", only as "not evaluated". Never raises."""
+    try:
+        sentences = _answer_sentences(answer_text)
+        if not sentences or not hits:
+            return {"min": None, "per_sentence": []}
+
+        import numpy as np
+
+        embedder = retrieval.get_embedder()
+        sent_emb = embedder.encode(sentences, normalize_embeddings=True, show_progress_bar=False)
+        chunk_emb = embedder.encode(
+            [h.get("text", "") for h in hits], normalize_embeddings=True, show_progress_bar=False
+        )
+        sims = np.asarray(sent_emb) @ np.asarray(chunk_emb).T
+
+        per_sentence = [
+            {"sentence": s, "score": round(float(sims[i].max()), 4)} for i, s in enumerate(sentences)
+        ]
+        return {"min": min(p["score"] for p in per_sentence), "per_sentence": per_sentence}
+    except Exception:
+        traceback.print_exc()
+        return {"min": None, "per_sentence": []}
+
+
 def unverified_identifiers(answer_text: str, headings: list[dict]) -> list[str]:
     vocab = heading_lead_words(headings)
     unverified = []
@@ -398,8 +464,8 @@ def generate_answer(
 
         if not ranked_sources:
             answer = "Maaf, informasi tersebut tidak ditemukan dalam dokumen yang tersedia."
-            database.log_answer(session_id, question, answer, 0.0, False, True, False, [])
-            return Answer(text=answer, sources=[])
+            log_id = database.log_answer(session_id, question, answer, 0.0, False, True, False, [])
+            return Answer(text=answer, sources=[], log_id=log_id)
 
         if len(ranked_sources) == 1:
             return generate_answer(question, session_id=session_id, _forced_source=ranked_sources[0][0])
@@ -427,8 +493,8 @@ def generate_answer(
             "\n\nSebutkan nama dokumen untuk jawaban lengkap."
         )
         candidates = [src for src, _ in top]
-        database.log_answer(session_id, question, message, None, False, False, True, wide_hits)
-        return ClarificationNeeded(message=message, candidates=candidates)
+        log_id = database.log_answer(session_id, question, message, None, False, False, True, wide_hits)
+        return ClarificationNeeded(message=message, candidates=candidates, log_id=log_id)
 
     # Enumerate-intent routing: a "list all X" / "apa saja X" / "berapa
     # banyak X" question must never go through similarity retrieval, which
@@ -443,8 +509,8 @@ def generate_answer(
         answer = (
             f"Ditemukan {len(broad['headings'])} bagian '{broad['category']}':\n{lines}"
         )
-        database.log_answer(session_id, question, answer, None, False, False, False, [])
-        return Answer(text=answer, sources=broad["sources"])
+        log_id = database.log_answer(session_id, question, answer, None, False, False, False, [])
+        return Answer(text=answer, sources=broad["sources"], log_id=log_id)
 
     doc_listing = retrieval.document_type_listing(question, named_sources)
     if doc_listing is not None:
@@ -453,8 +519,8 @@ def generate_answer(
             f"Ditemukan {len(doc_listing['sources'])} dokumen bertipe "
             f"'{doc_listing['doc_type']}':\n{lines}"
         )
-        database.log_answer(session_id, question, answer, None, False, False, False, [])
-        return Answer(text=answer, sources=doc_listing["sources"])
+        log_id = database.log_answer(session_id, question, answer, None, False, False, False, [])
+        return Answer(text=answer, sources=doc_listing["sources"], log_id=log_id)
 
     # Full-document fallback: a broad question (no specific clause/section
     # identifier referenced) about exactly one small named document skips
@@ -496,12 +562,12 @@ def generate_answer(
                     f"Catatan: {', '.join(unverified)} belum terverifikasi terhadap dokumen sumber."
                 )
             answer += _build_footer(footer_notes)
-            database.log_answer(
+            log_id = database.log_answer(
                 session_id, question, answer, None, looks_like_hedging(answer),
                 looks_like_refusal(answer), False, [],
                 prompt_tokens=prompt_tokens, response_tokens=response_tokens,
             )
-            return Answer(text=answer, sources=[named_sources[0]])
+            return Answer(text=answer, sources=[named_sources[0]], log_id=log_id)
 
     source_filter = named_sources or None
     hits = retrieval.retrieve(question, source_filter=source_filter, k=config.TOP_K)
@@ -513,14 +579,13 @@ def generate_answer(
             + ", ".join(ambiguity.candidates)
             + ". Mohon sebutkan dokumen yang dimaksud."
         )
-        clarification = ClarificationNeeded(message=message, candidates=ambiguity.candidates)
-        database.log_answer(session_id, question, message, None, False, False, True, hits)
-        return clarification
+        log_id = database.log_answer(session_id, question, message, None, False, False, True, hits)
+        return ClarificationNeeded(message=message, candidates=ambiguity.candidates, log_id=log_id)
 
     if not hits:
         answer = "Maaf, informasi tersebut tidak ditemukan dalam dokumen yang tersedia."
-        database.log_answer(session_id, question, answer, 0.0, False, True, False, [])
-        return Answer(text=answer, sources=named_sources)
+        log_id = database.log_answer(session_id, question, answer, 0.0, False, True, False, [])
+        return Answer(text=answer, sources=named_sources, log_id=log_id)
 
     prompt = build_prompt(question, hits)
     answer, prompt_tokens, response_tokens = call_ollama(prompt)
@@ -544,17 +609,20 @@ def generate_answer(
             f"(~{avg_ocr_confidence:.0f}/100)."
         )
 
+    groundedness = sentence_groundedness(answer, hits)
+
     answer += _build_footer(footer_notes)
     refused = looks_like_refusal(answer)
     hedged = looks_like_hedging(answer)
 
-    database.log_answer(
+    log_id = database.log_answer(
         session_id, question, answer, avg_score, hedged, refused, False, hits,
         avg_ocr_confidence=avg_ocr_confidence,
         prompt_tokens=prompt_tokens, response_tokens=response_tokens,
+        min_groundedness=groundedness["min"], sentence_groundedness=groundedness["per_sentence"],
     )
 
-    return Answer(text=answer, sources=relevant_sources)
+    return Answer(text=answer, sources=relevant_sources, log_id=log_id)
 
 
 _RESUME_WITH_DOCUMENT_RE = re.compile(r"^(.*?)\s+untuk dokumen\s+(\S.*)$", re.IGNORECASE | re.DOTALL)
@@ -597,6 +665,7 @@ def generate_multi_answer(text: str, session_id: Optional[str] = None) -> list[d
                     "needs_clarification": False,
                     "candidate_documents": [],
                     "sources": [],
+                    "log_id": None,
                 }
             )
             continue
@@ -611,6 +680,7 @@ def generate_multi_answer(text: str, session_id: Optional[str] = None) -> list[d
                     "needs_clarification": True,
                     "candidate_documents": result.candidates,
                     "sources": [],
+                    "log_id": result.log_id,
                 }
             )
         else:
@@ -623,6 +693,7 @@ def generate_multi_answer(text: str, session_id: Optional[str] = None) -> list[d
                     "needs_clarification": False,
                     "candidate_documents": [],
                     "sources": result.sources,
+                    "log_id": result.log_id,
                 }
             )
     return results
