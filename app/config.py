@@ -264,7 +264,19 @@ try:
 except Exception:
     _ram_worker_cap = 3  # psutil unavailable -- fall back to a conservative fixed cap
 
-INGEST_PARALLEL_WORKERS = max(1, min((os.cpu_count() or 4) - 1, _ram_worker_cap))
+# Manual escape hatch: the RAM formula above is deliberately conservative
+# (3GB reserved + 1.5GB/worker), so it can land on a lower count than a
+# human watching live available RAM would judge safe -- confirmed live it
+# computed 1 worker at 4.3GB available, just under the 4.5GB it wants for a
+# 2nd. Setting INGEST_WORKERS_OVERRIDE skips the formula entirely and uses
+# that number as-is -- this is a deliberate risk trade a person made with
+# eyes open (e.g. via Get-Counter), not something to reach for by default;
+# going too high reproduces the exact MemoryError crashes documented above.
+_override = os.getenv("INGEST_WORKERS_OVERRIDE")
+if _override:
+    INGEST_PARALLEL_WORKERS = max(1, int(_override))
+else:
+    INGEST_PARALLEL_WORKERS = max(1, min((os.cpu_count() or 4) - 1, _ram_worker_cap))
 
 # API
 API_HOST = "0.0.0.0"
