@@ -228,20 +228,30 @@ SYNC_INTERVAL_MINUTES = 15
 # not that code path specifically; the crash kept surfacing there only
 # because parsing an embedded CID font is common early per-page work that
 # happens to need a fresh allocation right when the system is already
-# critically low, not because that one file was uniquely broken. Budgets a
-# conservative 1GB/worker against currently-available RAM (via psutil,
-# reserving 2GB headroom for the main process's embedding model, Chroma/
-# sqlite, and Ollama) and takes whichever of that or the CPU-count bound is
-# lower, so a future higher-RAM machine still scales up by CPU count while
-# a tight one like this backs off automatically instead of repeating this
+# critically low, not because that one file was uniquely broken. Budgets
+# RAM per worker against currently-available RAM (via psutil, reserving
+# headroom for the main process's embedding model, Chroma/sqlite, and
+# Ollama) and takes whichever of that or the CPU-count bound is lower, so
+# a future higher-RAM machine still scales up by CPU count while a tight
+# one like this backs off automatically instead of repeating this
 # incident.
+#
+# First attempt at this budget (1GB/worker, 2GB reserved) still resolved
+# to 6 workers on a re-run once some RAM had freed up between attempts,
+# and confirmed live via Get-Counter '\Memory\Available MBytes' that left
+# only ~1.4GB truly available with those 6 workers just barely started (no
+# heavy pages yet) -- real observed per-worker footprint is already
+# ~650-800MB before doing any substantial OCR/VLM work, well above the 1GB
+# budget's assumed margin for that plus in-flight spikes. Raised to 1.5GB/
+# worker and 3GB reserved to leave real headroom for large-page spikes
+# instead of running at the edge of the observed danger zone.
 try:
     import psutil as _psutil
 
     _available_gb = _psutil.virtual_memory().available / (1024**3)
-    _ram_worker_cap = max(1, int((_available_gb - 2) // 1))
+    _ram_worker_cap = max(1, int((_available_gb - 3) // 1.5))
 except Exception:
-    _ram_worker_cap = 4  # psutil unavailable -- fall back to a conservative fixed cap
+    _ram_worker_cap = 3  # psutil unavailable -- fall back to a conservative fixed cap
 
 INGEST_PARALLEL_WORKERS = max(1, min((os.cpu_count() or 4) - 1, _ram_worker_cap))
 
