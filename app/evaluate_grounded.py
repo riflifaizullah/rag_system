@@ -1,11 +1,26 @@
 """Benchmark harness: runs the grounded eval questions (data/eval_questions.json)
 against the live system and scores retrieval / behavioral / content-correctness
-metrics. Scaled-down for this laptop's small test corpus (Section 10) --
-not the 600-file benchmark from Section 9, which is reference-only here.
+metrics.
+
+Checkpointed and resumable: confirmed live a 100-question run (each question
+makes a real, sometimes slow Ollama call) can take hours, and a crash partway
+through -- a real one happened, a ChromaDB/HNSW edge case on a small-chunk
+document -- previously meant losing everything and restarting from question
+1. Every question's result is written to data/eval_checkpoint.json the
+moment it's computed, keyed by a stable "<category>:<index>" id, and a
+re-run skips anything already in the checkpoint. Progress prints live
+per-question ([N/100] ...) instead of staying silent until the very end,
+which was the other real complaint -- no way to tell "is it working or
+stuck" during a multi-hour run.
+
+    python -m app.evaluate_grounded            # resumes from checkpoint if one exists
+    python -m app.evaluate_grounded --fresh     # ignores/clears any checkpoint, starts clean
 """
 from __future__ import annotations
 
 import json
+import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -13,6 +28,7 @@ from app import config, database, generation, retrieval
 
 EVAL_PATH = config.DATA_DIR / "eval_questions.json"
 REPORT_PATH = config.DATA_DIR / "eval_report.md"
+CHECKPOINT_PATH = config.DATA_DIR / "eval_checkpoint.json"
 
 
 def _overlap_ratio(expected: str, answer: str) -> float:
@@ -23,7 +39,62 @@ def _overlap_ratio(expected: str, answer: str) -> float:
     return len(expected_words & answer_words) / len(expected_words)
 
 
-def run_evaluation() -> dict:
+def _load_checkpoint() -> dict:
+    if CHECKPOINT_PATH.exists():
+        try:
+            return json.loads(CHECKPOINT_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            return {}  # corrupt/partial checkpoint -- start clean rather than crash
+    return {}
+
+
+def _save_checkpoint(checkpoint: dict) -> None:
+    # Write-to-temp-then-replace: an interruption mid-write leaves the OLD
+    # checkpoint file intact rather than a half-written, unparseable one --
+    # matters here specifically because this file gets rewritten after
+    # every single question, not just once at the end.
+    tmp = CHECKPOINT_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(checkpoint, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(CHECKPOINT_PATH)
+
+
+def _answer_text(result) -> str:
+    return result.message if isinstance(result, generation.ClarificationNeeded) else result.text
+
+
+def _compute_answerable(q: dict) -> dict:
+    result = generation.generate_answer(q["question"])
+    answer_text = _answer_text(result)
+
+    hits = retrieval.retrieve(q["question"], k=config.TOP_K)
+    hit_sources = {h["source"] for h in hits}
+    hit_pages = {(h["source"], h["page"]) for h in hits}
+
+    answered = not generation.looks_like_refusal(answer_text)
+    return {
+        "exact_doc_hit": q["expected_source"] in hit_sources,
+        "exact_page_hit": (q["expected_source"], q["expected_page"]) in hit_pages,
+        "answered": answered,
+        "content_score": _overlap_ratio(q["expected_text"] or "", answer_text),
+    }
+
+
+def _compute_refuse(q: dict) -> dict:
+    result = generation.generate_answer(q["question"])
+    answer_text = _answer_text(result)
+    return {"refused": generation.looks_like_refusal(answer_text)}
+
+
+def _compute_enumerate(q: dict) -> dict:
+    result = generation.generate_answer(q["question"])
+    answer_text = _answer_text(result).lower()
+    expected_items = q["expected_items"]
+    found = sum(1 for item in expected_items if item.lower() in answer_text)
+    completeness = found / max(1, len(expected_items))
+    return {"completeness": completeness, "exact_match": found == len(expected_items)}
+
+
+def run_evaluation(resume: bool = True) -> dict:
     database.init_db()
     with open(EVAL_PATH, encoding="utf-8") as f:
         questions = json.load(f)
@@ -31,77 +102,97 @@ def run_evaluation() -> dict:
     enumerate_qs = [q for q in questions if q.get("is_enumerate")]
     answerable = [q for q in questions if not q["should_refuse"] and not q.get("is_enumerate")]
     refuse_qs = [q for q in questions if q["should_refuse"]]
+    total = len(answerable) + len(refuse_qs) + len(enumerate_qs)
 
-    # Confusion matrix framing: "positive" = the system provided an answer
-    # rather than refusing. Ground truth positive = the corpus actually has
-    # the answer (an `answerable` question); ground truth negative = it
-    # doesn't (a `should_refuse` question). This is a BEHAVIORAL matrix --
-    # did the system correctly decide whether to answer at all -- kept
-    # separate from content_correctness_avg_overlap below, which is a
-    # continuous "was the substance of the answer right" score, not a
-    # binary classification.
+    checkpoint = _load_checkpoint() if resume else {}
+    if checkpoint:
+        print(f"Resuming: {len(checkpoint)}/{total} question(s) already in checkpoint.", flush=True)
+    done_so_far = len(checkpoint)
+    t_run_start = time.time()
+
+    def process(key: str, category: str, q: dict, compute_fn) -> dict:
+        nonlocal done_so_far
+        if key in checkpoint:
+            return checkpoint[key]["data"]
+        t0 = time.time()
+        try:
+            data = compute_fn(q)
+        except Exception as exc:
+            # A single bad question must not lose all progress made on the
+            # other 99 -- record the failure in the checkpoint (so a re-run
+            # doesn't retry it forever if it's a real, reproducible bug) and
+            # keep going. The final report surfaces failed_questions
+            # explicitly rather than silently underscoring the totals.
+            data = {"error": repr(exc)}
+        elapsed = time.time() - t0
+        checkpoint[key] = {"category": category, "question": q["question"], "data": data}
+        _save_checkpoint(checkpoint)
+        done_so_far += 1
+        status = "ERROR" if "error" in data else "ok"
+        print(
+            f"[{done_so_far}/{total}] ({category}) {status} {elapsed:.1f}s -- {q['question'][:70]!r}",
+            flush=True,
+        )
+        return data
+
+    for i, q in enumerate(answerable):
+        process(f"answerable:{i}", "answerable", q, _compute_answerable)
+    for i, q in enumerate(refuse_qs):
+        process(f"refuse:{i}", "refuse", q, _compute_refuse)
+    for i, q in enumerate(enumerate_qs):
+        process(f"enumerate:{i}", "enumerate", q, _compute_enumerate)
+
+    print(f"\nAll {total} questions processed in {time.time()-t_run_start:.1f}s this run.", flush=True)
+
+    # ---- reassemble aggregate metrics from the checkpoint ---- #
     tp = fn = tn = fp = 0
-    tp_cases, fn_cases, tn_cases, fp_cases = [], [], [], []
-
-    behavioral_correct = 0
-    exact_doc_hits = 0
-    exact_page_hits = 0
+    tp_cases, fn_cases, tn_cases, fp_cases, failed_cases = [], [], [], [], []
+    exact_doc_hits = exact_page_hits = 0
     content_scores = []
-
-    for q in answerable:
-        result = generation.generate_answer(q["question"])
-        answer_text = result.message if isinstance(result, generation.ClarificationNeeded) else result.text
-
-        hits = retrieval.retrieve(q["question"], k=config.TOP_K)
-        hit_sources = {h["source"] for h in hits}
-        hit_pages = {(h["source"], h["page"]) for h in hits}
-
-        if q["expected_source"] in hit_sources:
-            exact_doc_hits += 1
-        if (q["expected_source"], q["expected_page"]) in hit_pages:
-            exact_page_hits += 1
-
-        answered = not generation.looks_like_refusal(answer_text)
-        if answered:
-            behavioral_correct += 1
-            tp += 1
-            tp_cases.append(q["question"])
-        else:
-            fn += 1
-            fn_cases.append(q["question"])
-
-        content_scores.append(_overlap_ratio(q["expected_text"] or "", answer_text))
-
     refuse_correct = 0
-    for q in refuse_qs:
-        result = generation.generate_answer(q["question"])
-        answer_text = result.message if isinstance(result, generation.ClarificationNeeded) else result.text
-        refused = generation.looks_like_refusal(answer_text)
-        if refused:
-            refuse_correct += 1
-            tn += 1
-            tn_cases.append(q["question"])
-        else:
-            fp += 1
-            fp_cases.append(q["question"])
-
-    # Enumerate questions: ground truth is the real heading/document count
-    # from the actual generated structure (data/eval_questions.json's
-    # expected_items), not the LLM's own count. This is what would have
-    # caught the "list all Pasal" bug automatically -- a completeness
-    # regression here means the answer is missing real items, not that the
-    # LLM disagrees with itself.
     enumerate_completeness_scores = []
     enumerate_exact_matches = 0
-    for q in enumerate_qs:
-        result = generation.generate_answer(q["question"])
-        answer_text = result.message if isinstance(result, generation.ClarificationNeeded) else result.text
-        answer_lower = answer_text.lower()
-        expected_items = q["expected_items"]
-        found = sum(1 for item in expected_items if item.lower() in answer_lower)
-        completeness = found / max(1, len(expected_items))
-        enumerate_completeness_scores.append(completeness)
-        if found == len(expected_items):
+
+    for i in range(len(answerable)):
+        entry = checkpoint[f"answerable:{i}"]
+        data = entry["data"]
+        if "error" in data:
+            failed_cases.append((entry["question"], data["error"]))
+            continue
+        if data["exact_doc_hit"]:
+            exact_doc_hits += 1
+        if data["exact_page_hit"]:
+            exact_page_hits += 1
+        if data["answered"]:
+            tp += 1
+            tp_cases.append(entry["question"])
+        else:
+            fn += 1
+            fn_cases.append(entry["question"])
+        content_scores.append(data["content_score"])
+
+    for i in range(len(refuse_qs)):
+        entry = checkpoint[f"refuse:{i}"]
+        data = entry["data"]
+        if "error" in data:
+            failed_cases.append((entry["question"], data["error"]))
+            continue
+        if data["refused"]:
+            refuse_correct += 1
+            tn += 1
+            tn_cases.append(entry["question"])
+        else:
+            fp += 1
+            fp_cases.append(entry["question"])
+
+    for i in range(len(enumerate_qs)):
+        entry = checkpoint[f"enumerate:{i}"]
+        data = entry["data"]
+        if "error" in data:
+            failed_cases.append((entry["question"], data["error"]))
+            continue
+        enumerate_completeness_scores.append(data["completeness"])
+        if data["exact_match"]:
             enumerate_exact_matches += 1
 
     n_answerable = max(len(answerable), 1)
@@ -109,7 +200,7 @@ def run_evaluation() -> dict:
     n_enumerate = max(len(enumerate_qs), 1)
 
     report = {
-        "behavioral_accuracy_answerable": behavioral_correct / n_answerable,
+        "behavioral_accuracy_answerable": (tp + fn and tp / (tp + fn)) or 0.0,
         "behavioral_accuracy_should_refuse": refuse_correct / n_refuse,
         "retrieval_exact_document_hit": exact_doc_hits / n_answerable,
         "retrieval_exact_page_hit": exact_page_hits / n_answerable,
@@ -122,6 +213,8 @@ def run_evaluation() -> dict:
         "n_answerable": len(answerable),
         "n_should_refuse": len(refuse_qs),
         "n_enumerate": len(enumerate_qs),
+        "n_failed": len(failed_cases),
+        "failed_cases": failed_cases,
     }
 
     precision = tp / (tp + fp) if (tp + fp) else 0.0
@@ -176,6 +269,12 @@ def write_report_md(report: dict, cm: dict) -> Path:
         f"**F1:** {cm['f1']}  **Accuracy:** {cm['accuracy']}",
         f"",
     ]
+    if report.get("failed_cases"):
+        lines.append("### Failed questions (error during evaluation, excluded from metrics)")
+        lines.append("")
+        for q, err in report["failed_cases"]:
+            lines.append(f"- {q}  \n  `{err}`")
+        lines.append("")
     if cm["FP_cases"]:
         lines.append("### FP -- answered when it should have refused (check for hallucination)")
         lines.append("")
@@ -209,9 +308,18 @@ def write_report_md(report: dict, cm: dict) -> Path:
 
 
 if __name__ == "__main__":
-    report = run_evaluation()
+    fresh = "--fresh" in sys.argv
+    if fresh and CHECKPOINT_PATH.exists():
+        CHECKPOINT_PATH.unlink()
+        print("--fresh: cleared existing checkpoint.", flush=True)
+
+    report = run_evaluation(resume=not fresh)
     cm = report.pop("confusion_matrix")
     print(json.dumps(report, indent=2))
     print_confusion_matrix(cm)
     path = write_report_md(report, cm)
     print(f"\nReport written to {path}")
+    # Checkpoint is left in place on purpose after a successful run -- it's
+    # small, harmless, and means re-running (e.g. after a question-set
+    # tweak that only adds a few new questions) doesn't redo everything.
+    # --fresh clears it explicitly when a truly clean run is wanted.
