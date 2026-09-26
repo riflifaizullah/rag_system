@@ -636,6 +636,25 @@ def retrieve(question: str, source_filter: Optional[list[str]] = None, k: int = 
         where = {"source": {"$in": source_filter}} if len(source_filter) > 1 else {"source": source_filter[0]}
 
     candidate_k = max(k, config.RERANK_CANDIDATE_K) if config.RERANK_ENABLED else k
+    if where:
+        # Confirmed live: chromadb's HNSW query raises RuntimeError
+        # ("Cannot return the results in a contigious 2D array. Probably
+        # ef or M is too small") when n_results exceeds the number of
+        # vectors actually matching a `where` filter -- a filtered search
+        # can't return more results than exist in the filtered subset. A
+        # source-scoped query (a specific named document) routinely hits
+        # this: many real documents in this corpus have far fewer than
+        # RERANK_CANDIDATE_K (35) chunks. Not a corner case -- any question
+        # naming a short document would crash in production, not just in
+        # a synthetic eval. Cap n_results to the real filtered count first
+        # (a cheap id-only get, no document/embedding payload) rather than
+        # discovering the ceiling by crashing.
+        try:
+            filtered_ids = collection.get(where=where, include=[]).get("ids", [])
+        except Exception:
+            filtered_ids = None
+        if filtered_ids is not None:
+            candidate_k = max(1, min(candidate_k, len(filtered_ids)))
     result = collection.query(
         query_embeddings=query_embedding,
         n_results=candidate_k,
