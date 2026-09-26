@@ -112,6 +112,26 @@ RERANK_ENABLED = True
 RERANK_CANDIDATE_K = 35
 RERANK_MODEL = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"  # ~470MB, multilingual incl. Indonesian, now GPU-capable
 
+# Relevance gate: below this top-hit score, skip the LLM call entirely and
+# refuse -- confirmed live there was NO such gate at all, so any retrieval
+# (however weak) reached the LLM and refusal was left entirely to the
+# model's own judgment. A 100-question grounded eval found this let genuinely
+# off-topic questions (guitar, cooking, geography -- nothing this corpus has)
+# get answered from the model's general knowledge more than half the time
+# (44% correct-refusal rate).
+#
+# First calibration (0.55) used k=8; the actual no-named-document path
+# (generate_answer's multi-source discovery branch) retrieves at
+# MULTI_SOURCE_CANDIDATE_K=15, and a wider candidate pool raises the noise
+# floor -- a wider net always turns up SOME marginally-higher-scoring
+# irrelevant chunk purely by having more chances to. Confirmed live at the
+# real k=15: an off-topic "rendang recipe" question topped out at 0.574
+# (an unrelated HSSE risk-management document, not a real match) and still
+# slipped past 0.55. Recalibrated at the actual k=15 used in production:
+# off-topic top scores 0.36-0.57, genuine in-corpus questions 0.69-0.86 --
+# 0.62 sits cleanly in that gap with margin on both sides.
+RELEVANCE_MIN_SCORE = 0.62
+
 # Hybrid search: pure embedding similarity can rank a chunk containing the
 # exact WRONG Pasal number as more similar than the chunk with the right
 # one, on short structurally-repetitive legal text where every clause uses

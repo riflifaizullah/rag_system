@@ -430,6 +430,22 @@ def generate_answer(
     if not named_sources:
         wide_hits = retrieval.retrieve(question, source_filter=None, k=config.MULTI_SOURCE_CANDIDATE_K)
 
+        # Relevance gate on the RAW embedding score (not the reranked score
+        # used just below for "which document" -- rerank_score is a
+        # cross-encoder logit, a different, unbounded scale, so it can't
+        # share config.RELEVANCE_MIN_SCORE's calibration). This is the path
+        # a question with no named document takes -- confirmed live this is
+        # where most off-topic questions were slipping through: vector
+        # search always returns *some* top-k, several sources can end up
+        # "competing" on the reranked score even when none are genuinely
+        # relevant, and the ambiguity logic below only ever compares
+        # candidates to each other, never asks whether any of them clear an
+        # absolute floor at all.
+        if not wide_hits or max(h["score"] for h in wide_hits) < config.RELEVANCE_MIN_SCORE:
+            answer = "Maaf, informasi tersebut tidak ditemukan dalam dokumen yang tersedia."
+            log_id = database.log_answer(session_id, question, answer, 0.0, False, True, False, [])
+            return Answer(text=answer, sources=[], log_id=log_id)
+
         # Group by source using the RERANKED score, not the raw cosine
         # score -- confirmed live this matters: raw cosine similarity alone
         # put two unrelated documents' boilerplate-matching chunks at
@@ -571,6 +587,15 @@ def generate_answer(
 
     source_filter = named_sources or None
     hits = retrieval.retrieve(question, source_filter=source_filter, k=config.TOP_K)
+
+    # Relevance gate: a question genuinely unrelated to this corpus still
+    # gets a top-k back from vector search (it always returns *something*),
+    # so a missing gate here is what let off-topic questions reach the LLM
+    # and get answered from its own general knowledge instead of refused --
+    # see config.RELEVANCE_MIN_SCORE for the real data this threshold is
+    # calibrated against.
+    if hits and max(h["score"] for h in hits) < config.RELEVANCE_MIN_SCORE:
+        hits = []
 
     ambiguity = retrieval.detect_ambiguity(question, hits, named_sources)
     if ambiguity is not None:

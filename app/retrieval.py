@@ -655,12 +655,27 @@ def retrieve(question: str, source_filter: Optional[list[str]] = None, k: int = 
             filtered_ids = None
         if filtered_ids is not None:
             candidate_k = max(1, min(candidate_k, len(filtered_ids)))
-    result = collection.query(
-        query_embeddings=query_embedding,
-        n_results=candidate_k,
-        where=where,
-        include=["documents", "metadatas", "distances"],
-    )
+    # The count-based cap above still isn't airtight -- confirmed live in a
+    # 100-question eval, one filtered query still hit the same HNSW
+    # RuntimeError despite candidate_k <= the real filtered count. HNSW's
+    # filtered search is an approximate graph traversal, not an exact
+    # filter-then-scan: it isn't guaranteed to surface `candidate_k` results
+    # even when that many technically exist in the index. Halving and
+    # retrying is the honest fix for an approximate algorithm's edge case --
+    # down to 1, which is always satisfiable, so this can't loop forever.
+    while True:
+        try:
+            result = collection.query(
+                query_embeddings=query_embedding,
+                n_results=candidate_k,
+                where=where,
+                include=["documents", "metadatas", "distances"],
+            )
+            break
+        except RuntimeError:
+            if candidate_k <= 1:
+                raise
+            candidate_k = max(1, candidate_k // 2)
 
     embedding_ids = result.get("ids", [[]])[0]
     docs = result.get("documents", [[]])[0]
