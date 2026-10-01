@@ -55,3 +55,18 @@ dotnet/RagSystemWeb/*.log
 
 # Internal running log / handoff scratchpad, not meant for the shared repo.
 NOTES.md
+
+# Test/eval/maintenance tooling, kept local only -- not needed to run the
+# app itself (that's api.py, config.py, database.py, generation.py,
+# ingestion.py, retrieval.py, sync_documents.py). Results already live in
+# EVALUATION_RESULTS.md; the scripts/raw data that produced them stay here,
+# same reasoning as backend/testing/ and backend/result/ above.
+backend/app/build_eval_questions.py
+backend/app/evaluate_grounded.py
+backend/app/test_units.py
+backend/app/test_extraction.py
+backend/app/check_corpus_integrity.py
+backend/app/dump_chunks.py
+backend/app/reingest.py
+backend/app/reset_index.py
+backend/app/corpus_generator/generate.py

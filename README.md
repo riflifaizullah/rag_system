@@ -65,7 +65,7 @@ This is only what's actually in the repo. Several folders exist locally but are 
 | **Check any other endpoint** | `curl http://localhost:8000/documents` (list), `curl http://localhost:8000/sessions` (sessions) — see [`ARCHITECTURE.md`](ARCHITECTURE.md) §8 for the full endpoint table with file:line references |
 | **Watch the backend's own status page in a browser** | `http://localhost:8000/monitor` |
 | **Trigger a corpus resync** (new/changed/deleted files) | `curl -X POST http://localhost:8000/sync` |
-| **Run backend unit tests** | `cd backend` then `python -m pytest app/test_units.py -v` |
+| **Run backend unit tests** | Local-only (`backend/app/test_units.py` is gitignored test tooling, not in this repo) — ask the repo owner if you need it. |
 | **Run website unit tests** | `cd dotnet/RagSystemWeb.Tests` then `dotnet test` |
 | **Rebuild the index from scratch** | `cd backend` then `python -m app.sync_documents` |
 

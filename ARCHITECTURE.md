@@ -256,10 +256,12 @@ Two separate concerns, deliberately: **ingestion** (offline, run via `sync_docum
 | `retrieval.py` | Embedding search + cross-encoder rerank + hybrid search (RRF) + several targeted boosts (exact identifier, own-document-code, heading-quote) + ambiguity detection + the relevance gate. All ChromaDB access is funneled through one dedicated thread (`run_on_chroma_thread`) since Chroma isn't safe for concurrent multi-thread access. |
 | `generation.py` | Prompt construction, the Ollama call, multi-question splitting, refusal detection (`looks_like_refusal`), fabrication safety nets, the `ClarificationNeeded` response shape for ambiguous document references. |
 | `database.py` | All sqlite access: chat sessions/history, headings index, document registry (content hash, page count, size — for `/documents`), VLM description cache, answer-flagging log. |
-| `evaluate_grounded.py` | Checkpointed, resumable benchmark harness — runs `backend/data/eval_questions.json` against the live system, scores retrieval/behavioral/content metrics, writes `backend/data/eval_report.md`. See [`EVALUATION_RESULTS.md`](EVALUATION_RESULTS.md) for the latest numbers. |
-| `build_eval_questions.py` | Generates eval questions from the *real* indexed corpus (ground truth always comes from what's actually stored, never hand-invented). |
-| `check_corpus_integrity.py`, `test_extraction.py`, `reingest.py`, `reset_index.py`, `dump_chunks.py` | Operational/debug tooling — corpus anomaly auditing, extraction smoke tests, targeted re-ingestion, full index reset, chunk-log regeneration. |
-| `test_units.py` | Unit tests for pure/isolated functions (no Chroma/sqlite/Ollama) — fast, safe to run anytime. |
+| `evaluate_grounded.py`* | Checkpointed, resumable benchmark harness — runs `backend/data/eval_questions.json` against the live system, scores retrieval/behavioral/content metrics, writes `backend/data/eval_report.md`. See [`EVALUATION_RESULTS.md`](EVALUATION_RESULTS.md) for the latest numbers. |
+| `build_eval_questions.py`* | Generates eval questions from the *real* indexed corpus (ground truth always comes from what's actually stored, never hand-invented). |
+| `check_corpus_integrity.py`*, `test_extraction.py`*, `reingest.py`*, `reset_index.py`*, `dump_chunks.py`* | Operational/debug tooling — corpus anomaly auditing, extraction smoke tests, targeted re-ingestion, full index reset, chunk-log regeneration. |
+| `test_units.py`* | Unit tests for pure/isolated functions (no Chroma/sqlite/Ollama) — fast, safe to run anytime. |
+
+*Test/eval/maintenance tooling, not needed to run the app itself — kept local only (gitignored), same reasoning as `backend/testing/` in `.gitignore`. Not in this repo on GitHub; ask the repo owner if you need them.
 
 ## 5. Data flow: answering a question
 
