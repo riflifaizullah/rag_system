@@ -104,28 +104,28 @@ sequenceDiagram
 The branching logic behind most of the ingestion bugs in [`EVALUATION_RESULTS.md`](EVALUATION_RESULTS.md) §12 — real text vs. OCR fallback, rotation correction, and VLM diagram description are all decisions made per page, not a fixed per-document cost.
 
 ```mermaid
-flowchart TD
+flowchart LR
     Trigger(["sync_documents.py detects a new/changed file"]) --> PerPage
 
     subgraph PerPage["extract_ingest_data() — parallelized across worker processes"]
-        direction TB
-        A["extract_pdf_pages():<br/>read each page's text layer"] --> B{"Real text layer?<br/>(_looks_like_real_text)"}
-        B -- "no: scanned, or broken/<br/>custom embedded font" --> C["_ocr_page(): Tesseract OCR"]
-        C --> D["_correct_orientation():<br/>OSD rotation detect, gated on<br/>OSD's own confidence score"]
-        D --> E{"Low OCR confidence?"}
-        E -- "yes" --> F["Retry with a different<br/>Page Segmentation Mode"]
-        E -- "no" --> G
-        F --> G{"Page is graphical?<br/>(_page_is_graphical)"}
+        direction LR
+        A["extract_pdf_pages():<br/>read each page's text layer"] --> B{"Real text<br/>layer?"}
+        B -- "no: scanned/broken font" --> C["_ocr_page():<br/>Tesseract OCR"]
+        C --> D["_correct_orientation():<br/>OSD rotation detect"]
+        D --> E{"Low OCR<br/>confidence?"}
+        E -- "yes" --> F["Retry with different<br/>Page Segmentation Mode"]
+        E -- "no" --> G{"Page is<br/>graphical?"}
+        F --> G
         B -- "yes: real text" --> G
-        G -- "yes" --> H["_describe_page_image():<br/>Ollama VLM call,<br/>cached by image content hash"]
+        G -- "yes" --> H["_describe_page_image():<br/>Ollama VLM call, cached<br/>by image content hash"]
         G -- "no" --> I["detect_headings()"]
         H --> I
-        I --> J["chunk_page_text():<br/>1,000 chars / 150 overlap,<br/>split on detected headings"]
+        I --> J["chunk_page_text():<br/>1,000 chars / 150 overlap"]
     end
 
-    J --> K["write_ingest_data() — serialized to<br/>one path (ChromaDB concurrency<br/>constraint, see §6)"]
+    J --> K["write_ingest_data():<br/>serialized (ChromaDB<br/>concurrency, see §6)"]
     K --> L["Embed each chunk,<br/>write to ChromaDB + sqlite"]
-    L --> Done(["Indexed — ready to serve /ask"])
+    L --> Done(["Indexed — ready<br/>to serve /ask"])
 ```
 
 ![Ingestion pipeline flowchart](diagrams/ingestion-pipeline.png)
