@@ -1,41 +1,46 @@
-# STK Online — Blazor Server website
+# STK Online: Blazor Server website
 
-The current primary frontend — a complete Blazor Server (.NET 8) website in
-[`RagSystemWeb/`](RagSystemWeb/), built to match the project's UI mockup and
-covering the full feature set: chat with the real backend, session history,
-document search/preview (with a resizable panel and native in-browser PDF
-rendering), ambiguous-question candidate resolution, answer flagging, and a
-dark/light theme toggle.
+Frontend utama saat ini: sebuah website Blazor Server (.NET 8) lengkap di
+[`RagSystemWeb/`](RagSystemWeb/), dibuat agar sesuai dengan mockup UI proyek
+dan mencakup seluruh fitur: chat dengan backend asli, riwayat sesi,
+pencarian/pratinjau dokumen (dengan panel yang dapat diubah ukurannya dan
+rendering PDF native di browser), resolusi kandidat untuk pertanyaan ambigu,
+penandaan jawaban (answer flagging), serta tombol ganti tema gelap/terang.
 
-See [`../DEPLOYMENT.md`](../DEPLOYMENT.md) for how to actually run this —
-prerequisites, the gitignored corpus/index data you'll need separately, a
-machine-specific hardcoded path to check, and a real Windows gotcha
-(Smart App Control) that can block the backend from starting.
+Lihat [`../DEPLOYMENT.md`](../DEPLOYMENT.md) untuk cara menjalankan ini
+sebenarnya: prasyarat, data korpus/indeks yang di-gitignore yang perlu Anda
+siapkan secara terpisah, sebuah path hardcoded khusus mesin yang perlu
+diperiksa, dan satu masalah nyata di Windows (Smart App Control) yang bisa
+menghalangi backend untuk mulai berjalan.
 
-## How it talks to the backend
+## Cara berkomunikasi dengan backend
 
-Pure HTTP client of the same FastAPI contract documented in
-[`../ARCHITECTURE.md`](../ARCHITECTURE.md) §7 — nothing in `backend/` was
-written with this frontend in mind, and nothing here touches ChromaDB/sqlite
-directly. `Services/ApiClient.cs` is the only place that calls the backend.
+Murni merupakan HTTP client dari kontrak FastAPI yang sama seperti yang
+didokumentasikan di [`../ARCHITECTURE.md`](../ARCHITECTURE.md) §7. Tidak ada
+bagian di `backend/` yang ditulis dengan mempertimbangkan frontend ini, dan
+tidak ada bagian di sini yang menyentuh ChromaDB/sqlite secara langsung.
+`Services/ApiClient.cs` adalah satu-satunya tempat yang memanggil backend.
 
-One small backend change *was* needed and made: `document_download()` in
-`backend/app/api.py` sets `Content-Disposition: inline` instead of the
-Starlette default `attachment`, so this frontend's `<iframe>` preview panel
-renders PDFs natively instead of triggering a download prompt.
+Ada satu perubahan kecil pada backend yang memang diperlukan dan telah
+dilakukan: `document_download()` di `backend/app/api.py` mengatur
+`Content-Disposition: inline`, bukan `attachment` seperti default Starlette,
+sehingga panel pratinjau `<iframe>` pada frontend ini bisa me-render PDF
+secara native, bukan malah memicu prompt download.
 
-## Auto-launching the backend
+## Menjalankan backend secara otomatis
 
-`Services/BackendLauncher.cs` health-checks `http://localhost:8000/health`
-on startup and spawns `uvicorn app.api:app` itself if nothing answers (an
-atomic lock file prevents two instances racing to spawn it twice). This is
-why `dotnet run` alone is enough to get a working system — see
-`../DEPLOYMENT.md` for the one machine-specific path inside this file you
-may need to edit.
+`Services/BackendLauncher.cs` melakukan health-check ke
+`http://localhost:8000/health` saat startup dan akan menjalankan
+`uvicorn app.api:app` sendiri jika tidak ada yang merespons (sebuah atomic
+lock file mencegah dua instance saling bersaing untuk menjalankannya dua
+kali). Inilah alasan mengapa cukup menjalankan `dotnet run` saja untuk
+mendapatkan sistem yang berfungsi; lihat `../DEPLOYMENT.md` untuk satu path
+khusus mesin di dalam file ini yang mungkin perlu Anda ubah.
 
-## Relationship to `frontend-streamlit/`
+## Hubungan dengan `frontend-streamlit/`
 
-Both are independent HTTP clients of the exact same backend contract —
-see [`../README.md`](../README.md) for current status of each. Streamlit is
-kept as the original prototyping surface; this is the one built out to the
-full mockup and intended as the primary frontend going forward.
+Keduanya merupakan HTTP client independen dari kontrak backend yang persis
+sama. Lihat [`../README.md`](../README.md) untuk status terkini masing-masing.
+Streamlit dipertahankan sebagai permukaan prototyping awal, sedangkan ini
+adalah frontend yang dikembangkan penuh sesuai mockup dan dimaksudkan sebagai
+frontend utama ke depannya.

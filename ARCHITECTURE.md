@@ -1,41 +1,41 @@
-# STK Online — System Architecture
+# STK Online: Arsitektur Sistem
 
-**Last updated:** 2026-10-01
+**Terakhir diperbarui:** 2026-10-01
 
-This document exists so a new engineer can orient on this system without re-reading the whole codebase (see also [`NOTES.md`](NOTES.md) for project history and current state). It describes what exists and why, not implementation minutiae — read the module itself for that.
+Dokumen ini dibuat agar seorang engineer baru dapat memahami sistem ini tanpa harus membaca ulang seluruh basis kode (lihat juga [`NOTES.md`](NOTES.md) untuk riwayat proyek dan status terkini). Dokumen ini menjelaskan apa yang ada dan alasannya, bukan detail implementasi; untuk itu, baca modulnya sendiri.
 
-## 1. What this system is
+## 1. Apa sistem ini
 
-A retrieval-augmented generation (RAG) question-answering system over 1,177 real internal documents (SOPs, contracts, TKO/TKI/TKPA procedures) for PT Pertamina Drilling Services Indonesia (PDSI). A user asks a question in Indonesian, the system retrieves relevant document chunks and answers grounded in them, or explicitly refuses when the corpus doesn't contain the answer. All documents are internal/confidential (real contracts, employee health data) — nothing in `backend/data/` goes to a third-party host; everything runs locally against a local Ollama instance.
+Sebuah sistem tanya jawab retrieval-augmented generation (RAG) atas 1.177 dokumen internal nyata (SOP, kontrak, prosedur TKO/TKI/TKPA) untuk PT Pertamina Drilling Services Indonesia (PDSI). Pengguna mengajukan pertanyaan dalam Bahasa Indonesia, sistem mengambil potongan dokumen yang relevan dan menjawab berdasarkan potongan tersebut, atau menolak secara eksplisit ketika korpus tidak memuat jawabannya. Semua dokumen bersifat internal/rahasia (kontrak nyata, data kesehatan karyawan): tidak ada apa pun di `backend/data/` yang dikirim ke pihak ketiga; semuanya berjalan secara lokal terhadap instance Ollama lokal.
 
-**Two frontends exist** against the same backend contract — see [`README.md`](README.md) for which is which and current status of each.
+**Terdapat dua frontend** yang menggunakan kontrak backend yang sama, lihat [`README.md`](README.md) untuk mengetahui mana yang mana dan status terkini masing-masing.
 
-## 2. Diagrams
+## 2. Diagram
 
-### 2.1 Component overview
+### 2.1 Gambaran umum komponen
 
-Both frontends are independent HTTP clients of the same backend; neither touches ChromaDB, sqlite, or Ollama directly.
+Kedua frontend merupakan klien HTTP independen terhadap backend yang sama; keduanya tidak menyentuh ChromaDB, sqlite, atau Ollama secara langsung.
 
 ```mermaid
 flowchart TB
     subgraph Frontends
-        Blazor["Blazor Server website<br/>(dotnet/RagSystemWeb)<br/>primary frontend"]
-        Streamlit["Streamlit app<br/>(frontend-streamlit)<br/>legacy/prototype"]
+        Blazor["Situs web Blazor Server<br/>(dotnet/RagSystemWeb)<br/>frontend utama"]
+        Streamlit["Aplikasi Streamlit<br/>(frontend-streamlit)<br/>legacy/prototipe"]
     end
 
-    subgraph Backend["backend/ — FastAPI (app/api.py)"]
-        API["api.py<br/>HTTP routes"]
-        Retrieval["retrieval.py<br/>embed + search + rerank + boosts"]
-        Generation["generation.py<br/>prompt + refusal detection"]
-        Database["database.py<br/>sessions, headings, flags"]
-        Ingestion["ingestion.py + sync_documents.py<br/>offline pipeline"]
+    subgraph Backend["backend/: FastAPI (app/api.py)"]
+        API["api.py<br/>rute HTTP"]
+        Retrieval["retrieval.py<br/>embed + pencarian + rerank + boost"]
+        Generation["generation.py<br/>prompt + deteksi penolakan"]
+        Database["database.py<br/>sesi, heading, flag"]
+        Ingestion["ingestion.py + sync_documents.py<br/>pipeline offline"]
     end
 
-    Chroma[(ChromaDB<br/>vector chunks)]
-    Sqlite[(sqlite<br/>sessions/headings/log)]
-    Ollama{{"Ollama (local)<br/>LLM qwen3.5:9b<br/>VLM qwen2.5vl:7b"}}
-    Embed["In-process models<br/>embedder + cross-encoder reranker"]
-    Corpus[/"backend/data/corpus/<br/>1,177 real PDFs"/]
+    Chroma[(ChromaDB<br/>potongan vektor)]
+    Sqlite[(sqlite<br/>sesi/heading/log)]
+    Ollama{{"Ollama (lokal)<br/>LLM qwen3.5:9b<br/>VLM qwen2.5vl:7b"}}
+    Embed["Model in-process<br/>embedder + cross-encoder reranker"]
+    Corpus[/"backend/data/corpus/<br/>1.177 PDF nyata"/]
 
     Blazor -- "HTTP :8000" --> API
     Streamlit -- "HTTP :8000" --> API
@@ -45,10 +45,10 @@ flowchart TB
     Retrieval --> Chroma
     Retrieval --> Embed
     Retrieval --> Database
-    Generation -- "LLM call" --> Ollama
+    Generation -- "Panggilan LLM" --> Ollama
     Generation --> Database
     Database --> Sqlite
-    Ingestion -- "VLM call, offline only" --> Ollama
+    Ingestion -- "Panggilan VLM, hanya offline" --> Ollama
     Ingestion --> Chroma
     Ingestion --> Sqlite
     Ingestion --> Corpus
@@ -56,15 +56,15 @@ flowchart TB
 
 ![Component overview diagram](diagrams/component-overview.png)
 
-*(The diagram above renders live on GitHub from the Mermaid code block; the PNG is a static backup for viewers that don't render Mermaid, e.g. local editors or exported PDFs.)*
+*(Diagram di atas dirender langsung di GitHub dari blok kode Mermaid; PNG merupakan cadangan statis untuk penampil yang tidak merender Mermaid, misalnya editor lokal atau PDF hasil ekspor.)*
 
-### 2.2 Sequence: answering a question (`POST /ask`)
+### 2.2 Sekuens: menjawab sebuah pertanyaan (`POST /ask`)
 
-The exact flow narrated in §5 below, as a sequence diagram.
+Alur persis yang dijelaskan pada §5 di bawah, dalam bentuk diagram sekuens.
 
 ```mermaid
 sequenceDiagram
-    actor User
+    actor User as Pengguna
     participant UI as Frontend (Blazor/Streamlit)
     participant API as api.py
     participant Retr as retrieval.py
@@ -73,70 +73,70 @@ sequenceDiagram
     participant Ollama
     participant DB as database.py (sqlite)
 
-    User->>UI: types a question
+    User->>UI: mengetik pertanyaan
     UI->>API: POST /ask {question, session_id}
     API->>Retr: retrieve(question)
-    Retr->>Retr: embed question (in-process)
-    Retr->>Chroma: hybrid search (dense + RRF)
-    Chroma-->>Retr: candidate chunks
-    Retr->>Retr: rerank (cross-encoder) + boosts + dedupe
-    Retr-->>API: top-k chunks + scores
+    Retr->>Retr: embed pertanyaan (in-process)
+    Retr->>Chroma: pencarian hybrid (dense + RRF)
+    Chroma-->>Retr: kandidat potongan
+    Retr->>Retr: rerank (cross-encoder) + boost + dedupe
+    Retr-->>API: potongan top-k + skor
 
-    alt relevance gate fails (raw AND rerank both below threshold)
-        API-->>UI: refused, no LLM call made
-    else gate passes
+    alt gerbang relevansi gagal (raw DAN rerank sama-sama di bawah ambang batas)
+        API-->>UI: ditolak, tidak ada panggilan LLM yang dilakukan
+    else gerbang lolos
         API->>Gen: generate_answer(question, chunks)
-        Gen->>Ollama: prompt (grounded in chunks)
-        Ollama-->>Gen: raw answer text
-        Gen->>Gen: looks_like_refusal() check
-        Gen->>DB: save_message() + log answer
+        Gen->>Ollama: prompt (berbasis potongan)
+        Ollama-->>Gen: teks jawaban mentah
+        Gen->>Gen: pemeriksaan looks_like_refusal()
+        Gen->>DB: save_message() + catat jawaban
         DB-->>Gen: log_id
-        Gen-->>API: answer, sources, answered/refused, log_id
-        API-->>UI: JSON response
-        UI-->>User: renders answer + source chips
+        Gen-->>API: jawaban, sumber, answered/refused, log_id
+        API-->>UI: respons JSON
+        UI-->>User: merender jawaban + chip sumber
     end
 ```
 
 ![Sequence diagram: answering a question](diagrams/sequence-ask-flow.png)
 
-### 2.3 Ingestion pipeline (per page, inside `extract_ingest_data()`)
+### 2.3 Pipeline ingestion (per halaman, di dalam `extract_ingest_data()`)
 
-The branching logic behind most of the ingestion bugs in [`EVALUATION_RESULTS.md`](EVALUATION_RESULTS.md) §12 — real text vs. OCR fallback, rotation correction, and VLM diagram description are all decisions made per page, not a fixed per-document cost.
+Logika percabangan di balik sebagian besar bug ingestion pada [`EVALUATION_RESULTS.md`](EVALUATION_RESULTS.md) §12: teks asli vs. fallback OCR, koreksi rotasi, dan deskripsi diagram VLM semuanya merupakan keputusan yang diambil per halaman, bukan biaya tetap per dokumen.
 
 ```mermaid
 flowchart LR
-    Trigger(["sync_documents.py detects a new/changed file"]) --> PerPage
+    Trigger(["sync_documents.py mendeteksi file baru/berubah"]) --> PerPage
 
-    subgraph PerPage["extract_ingest_data() — parallelized across worker processes"]
+    subgraph PerPage["extract_ingest_data(): diparalelkan di beberapa worker process"]
         direction LR
-        A["extract_pdf_pages():<br/>read each page's text layer"] --> B{"Real text<br/>layer?"}
-        B -- "no: scanned/broken font" --> C["_ocr_page():<br/>Tesseract OCR"]
-        C --> D["_correct_orientation():<br/>OSD rotation detect"]
-        D --> E{"Low OCR<br/>confidence?"}
-        E -- "yes" --> F["Retry with different<br/>Page Segmentation Mode"]
-        E -- "no" --> G{"Page is<br/>graphical?"}
+        A["extract_pdf_pages():<br/>membaca lapisan teks setiap halaman"] --> B{"Lapisan teks<br/>asli?"}
+        B -- "tidak: hasil pindai/font rusak" --> C["_ocr_page():<br/>Tesseract OCR"]
+        C --> D["_correct_orientation():<br/>deteksi rotasi OSD"]
+        D --> E{"Keyakinan OCR<br/>rendah?"}
+        E -- "ya" --> F["Coba ulang dengan<br/>Page Segmentation Mode berbeda"]
+        E -- "tidak" --> G{"Halaman bersifat<br/>grafis?"}
         F --> G
-        B -- "yes: real text" --> G
-        G -- "yes" --> H["_describe_page_image():<br/>Ollama VLM call, cached<br/>by image content hash"]
-        G -- "no" --> I["detect_headings()"]
+        B -- "ya: teks asli" --> G
+        G -- "ya" --> H["_describe_page_image():<br/>panggilan VLM Ollama, di-cache<br/>berdasarkan hash konten gambar"]
+        G -- "tidak" --> I["detect_headings()"]
         H --> I
-        I --> J["chunk_page_text():<br/>1,000 chars / 150 overlap"]
+        I --> J["chunk_page_text():<br/>1.000 karakter / overlap 150"]
     end
 
-    J --> K["write_ingest_data():<br/>serialized (ChromaDB<br/>concurrency, see §6)"]
-    K --> L["Embed each chunk,<br/>write to ChromaDB + sqlite"]
-    L --> Done(["Indexed — ready<br/>to serve /ask"])
+    J --> K["write_ingest_data():<br/>diserialisasi (konkurensi<br/>ChromaDB, lihat §6)"]
+    K --> L["Embed setiap potongan,<br/>tulis ke ChromaDB + sqlite"]
+    L --> Done(["Terindeks, siap<br/>melayani /ask"])
 ```
 
 ![Ingestion pipeline flowchart](diagrams/ingestion-pipeline.png)
 
-### 2.4 Database schema (sqlite, `backend/app/database.py`)
+### 2.4 Skema basis data (sqlite, `backend/app/database.py`)
 
 ```mermaid
 erDiagram
-    DOCUMENTS ||--o{ HEADINGS : "has"
-    SESSIONS ||--o{ MESSAGES : "has"
-    SESSIONS ||--o{ ANSWER_LOG : "has (nullable FK)"
+    DOCUMENTS ||--o{ HEADINGS : "memiliki"
+    SESSIONS ||--o{ MESSAGES : "memiliki"
+    SESSIONS ||--o{ ANSWER_LOG : "memiliki (FK nullable)"
 
     DOCUMENTS {
         text source PK
@@ -186,15 +186,15 @@ erDiagram
 
 ![Database schema ER diagram](diagrams/database-schema.png)
 
-`VLM_CACHE` is standalone (keyed by image content hash, no relation to the other tables) — this is the caching layer referenced in §6's "VLM description caching" design decision. `ANSWER_LOG.session_id` is nullable: not every answer is tied to a chat session (e.g. direct API testing).
+`VLM_CACHE` berdiri sendiri (menggunakan kunci hash konten gambar, tidak berelasi dengan tabel lain): ini adalah lapisan caching yang dirujuk pada keputusan desain "VLM description caching" di §6. `ANSWER_LOG.session_id` bersifat nullable: tidak setiap jawaban terikat pada sesi chat (misalnya pengujian API langsung).
 
-### 2.5 Module dependencies (`backend/app/`)
+### 2.5 Dependensi antar-modul (`backend/app/`)
 
-Matches the responsibilities table in §4 — arrows show "depends on / calls into."
+Sesuai dengan tabel tanggung jawab pada §4; panah menunjukkan "bergantung pada / memanggil ke".
 
 ```mermaid
 flowchart TD
-    api["api.py<br/>(FastAPI routes)"]
+    api["api.py<br/>(rute FastAPI)"]
     retrieval["retrieval.py"]
     generation["generation.py"]
     database["database.py"]
@@ -224,101 +224,102 @@ flowchart TD
 
 ![Module dependency diagram](diagrams/module-dependencies.png)
 
-## 3. High-level architecture
+## 3. Arsitektur tingkat tinggi
 
-**Which module uses which model — the short version:**
+**Modul mana yang menggunakan model yang mana, versi singkatnya:**
 
 | Module | Model(s) it calls | How |
 |---|---|---|
-| `retrieval.py` | Embedding model + reranker | Loaded in-process (sentence-transformers / cross-encoder) — **not** via Ollama, no network call |
-| `generation.py` | LLM (`qwen3.5:9b`) | Via a local Ollama HTTP call |
-| `ingestion.py` | VLM (`qwen2.5vl:7b`) | Via a local Ollama HTTP call — **only at ingest time**, never while answering a live question |
+| `retrieval.py` | Model embedding + reranker | Dimuat in-process (sentence-transformers / cross-encoder): **bukan** melalui Ollama, tidak ada panggilan jaringan |
+| `generation.py` | LLM (`qwen3.5:9b`) | Melalui panggilan HTTP Ollama lokal |
+| `ingestion.py` | VLM (`qwen2.5vl:7b`) | Melalui panggilan HTTP Ollama lokal: **hanya pada saat ingest**, tidak pernah saat menjawab pertanyaan secara langsung |
 
-`database.py` (sqlite: sessions, headings, document registry, flags) is called
-by both `retrieval.py` and `generation.py` along the way (see §2.1's diagram),
-not detailed again here — see §4 for what it stores.
+`database.py` (sqlite: sesi, heading, registri dokumen, flag) dipanggil
+oleh `retrieval.py` maupun `generation.py` di sepanjang alur (lihat diagram
+§2.1), tidak dijelaskan lagi secara rinci di sini; lihat §4 untuk apa saja yang disimpannya.
 
-**Ingestion is a separate, offline pipeline** (`ingestion.py` +
-`sync_documents.py`) — it runs before any question is ever asked, populating
-ChromaDB and sqlite from `backend/data/corpus/`. It's the only place the VLM gets
-called. The serving path (§2.2) never touches it at request time.
+**Ingestion merupakan pipeline terpisah yang berjalan secara offline**
+(`ingestion.py` + `sync_documents.py`): berjalan sebelum ada pertanyaan apa
+pun yang diajukan, mengisi ChromaDB dan sqlite dari `backend/data/corpus/`.
+Ini adalah satu-satunya tempat VLM dipanggil. Alur serving (§2.2) tidak
+pernah menyentuhnya pada saat request.
 
-Two separate concerns, deliberately: **ingestion** (offline, run via `sync_documents`, populates ChromaDB + sqlite from `backend/data/corpus/`) and **serving** (the FastAPI app, read-only against the already-built index at request time). The UI never touches ChromaDB or sqlite directly — everything goes through the FastAPI HTTP API, which is exactly what let the .NET frontend get built later with zero backend changes.
+Dua concern yang sengaja dipisahkan: **ingestion** (offline, dijalankan lewat `sync_documents`, mengisi ChromaDB + sqlite dari `backend/data/corpus/`) dan **serving** (aplikasi FastAPI, bersifat read-only terhadap indeks yang sudah dibangun pada saat request). UI tidak pernah menyentuh ChromaDB atau sqlite secara langsung; semuanya melewati HTTP API FastAPI, yang justru memungkinkan frontend .NET dibangun belakangan tanpa perubahan apa pun pada backend.
 
-## 4. Module responsibilities (`backend/app/`)
+## 4. Tanggung jawab modul (`backend/app/`)
 
 | Module | Responsibility |
 |---|---|
-| `api.py` | FastAPI routes: `/ask`, `/sync`, `/documents` (list/download), `/sessions`, `/sessions/{id}/history`, `/flag/{log_id}`, `/health`, `/monitor` (status page). Thin — delegates to `retrieval`/`generation`/`database`. |
-| `config.py` | All tuning constants in one place (models, timeouts, thresholds, chunk sizes) with inline rationale comments explaining *why* each value is what it is. |
-| `ingestion.py` | PDF parsing, OCR fallback (scanned/broken-font pages), rotation correction, VLM diagram description, structure-aware chunking, embedding, writing to ChromaDB + sqlite. The CPU-bound extraction half (`extract_ingest_data`) is separated from the shared-state-writing half (`write_ingest_data`) so extraction can be parallelized across worker processes while writes stay serialized. |
-| `sync_documents.py` | Corpus reconciliation via content hashing: detects new/updated/unchanged/deleted files. One implementation, four trigger paths (scheduled job, `/sync` endpoint, UI button, manual CLI run). |
-| `retrieval.py` | Embedding search + cross-encoder rerank + hybrid search (RRF) + several targeted boosts (exact identifier, own-document-code, heading-quote) + ambiguity detection + the relevance gate. All ChromaDB access is funneled through one dedicated thread (`run_on_chroma_thread`) since Chroma isn't safe for concurrent multi-thread access. |
-| `generation.py` | Prompt construction, the Ollama call, multi-question splitting, refusal detection (`looks_like_refusal`), fabrication safety nets, the `ClarificationNeeded` response shape for ambiguous document references. |
-| `database.py` | All sqlite access: chat sessions/history, headings index, document registry (content hash, page count, size — for `/documents`), VLM description cache, answer-flagging log. |
-| `evaluate_grounded.py`* | Checkpointed, resumable benchmark harness — runs `backend/data/eval_questions.json` against the live system, scores retrieval/behavioral/content metrics, writes `backend/data/eval_report.md`. See [`EVALUATION_RESULTS.md`](EVALUATION_RESULTS.md) for the latest numbers. |
-| `build_eval_questions.py`* | Generates eval questions from the *real* indexed corpus (ground truth always comes from what's actually stored, never hand-invented). |
-| `check_corpus_integrity.py`*, `test_extraction.py`*, `reingest.py`*, `reset_index.py`*, `dump_chunks.py`* | Operational/debug tooling — corpus anomaly auditing, extraction smoke tests, targeted re-ingestion, full index reset, chunk-log regeneration. |
-| `test_units.py`* | Unit tests for pure/isolated functions (no Chroma/sqlite/Ollama) — fast, safe to run anytime. |
+| `api.py` | Rute FastAPI: `/ask`, `/sync`, `/documents` (list/download), `/sessions`, `/sessions/{id}/history`, `/flag/{log_id}`, `/health`, `/monitor` (halaman status). Tipis: hanya mendelegasikan ke `retrieval`/`generation`/`database`. |
+| `config.py` | Semua konstanta tuning dikumpulkan di satu tempat (model, timeout, ambang batas, ukuran chunk) dengan komentar inline yang menjelaskan *mengapa* setiap nilai ditetapkan seperti itu. |
+| `ingestion.py` | Parsing PDF, fallback OCR (halaman hasil pindai/font rusak), koreksi rotasi, deskripsi diagram VLM, chunking yang sadar struktur, embedding, dan penulisan ke ChromaDB + sqlite. Bagian ekstraksi yang CPU-bound (`extract_ingest_data`) dipisahkan dari bagian penulisan shared-state (`write_ingest_data`) sehingga ekstraksi dapat diparalelkan di beberapa worker process sementara penulisan tetap diserialisasi. |
+| `sync_documents.py` | Rekonsiliasi korpus melalui content hashing: mendeteksi file baru/diperbarui/tidak berubah/dihapus. Satu implementasi, empat jalur pemicu (scheduled job, endpoint `/sync`, tombol UI, menjalankan CLI secara manual). |
+| `retrieval.py` | Pencarian embedding + rerank cross-encoder + pencarian hybrid (RRF) + beberapa boost yang ditargetkan (identifier persis, kode dokumen sendiri, kutipan heading) + deteksi ambiguitas + gerbang relevansi. Semua akses ChromaDB disalurkan melalui satu thread khusus (`run_on_chroma_thread`) karena Chroma tidak aman untuk akses multi-thread secara konkuren. |
+| `generation.py` | Konstruksi prompt, panggilan Ollama, pemisahan multi-pertanyaan, deteksi penolakan (`looks_like_refusal`), jaring pengaman fabrikasi, bentuk respons `ClarificationNeeded` untuk referensi dokumen yang ambigu. |
+| `database.py` | Semua akses sqlite: sesi/riwayat chat, indeks heading, registri dokumen (content hash, jumlah halaman, ukuran, untuk `/documents`), cache deskripsi VLM, log penandaan jawaban. |
+| `evaluate_grounded.py`* | Harness benchmark yang di-checkpoint dan dapat dilanjutkan (resumable): menjalankan `backend/data/eval_questions.json` terhadap sistem live, menilai metrik retrieval/behavioral/content, dan menulis `backend/data/eval_report.md`. Lihat [`EVALUATION_RESULTS.md`](EVALUATION_RESULTS.md) untuk angka terbaru. |
+| `build_eval_questions.py`* | Menghasilkan pertanyaan evaluasi dari korpus yang *benar-benar* terindeks (ground truth selalu berasal dari apa yang benar-benar tersimpan, tidak pernah dikarang manual). |
+| `check_corpus_integrity.py`*, `test_extraction.py`*, `reingest.py`*, `reset_index.py`*, `dump_chunks.py`* | Tooling operasional/debug: audit anomali korpus, smoke test ekstraksi, re-ingestion yang ditargetkan, reset indeks penuh, regenerasi chunk-log. |
+| `test_units.py`* | Unit test untuk fungsi murni/terisolasi (tanpa Chroma/sqlite/Ollama): cepat, aman dijalankan kapan saja. |
 
-*Test/eval/maintenance tooling, not needed to run the app itself — kept local only (gitignored), same reasoning as `backend/testing/` in `.gitignore`. Not in this repo on GitHub; ask the repo owner if you need them.
+*Tooling test/eval/maintenance, tidak diperlukan untuk menjalankan aplikasi itu sendiri: disimpan lokal saja (gitignored), dengan alasan yang sama seperti `backend/testing/` di `.gitignore`. Tidak ada di repo GitHub ini; tanyakan ke pemilik repo jika membutuhkannya.
 
-## 5. Data flow: answering a question
+## 5. Alur data: menjawab sebuah pertanyaan
 
-See §2.2 for the sequence diagram — this is the same flow in prose, with the specific thresholds/config values that make each step concrete:
+Lihat §2.2 untuk diagram sekuensnya; ini adalah alur yang sama dalam bentuk naratif, dengan nilai ambang batas/konfigurasi spesifik yang membuat setiap langkah konkret:
 
-1. **UI → `/ask`** with `{question, session_id}`.
-2. **`retrieval.retrieve()`**: embed the question, search ChromaDB (hybrid: dense + optionally sparse via RRF), rerank top candidates with a cross-encoder, apply boosts (exact identifier match, own-document-code, quoted-heading jump), dedupe repeated chunks (e.g. running headers), truncate to `TOP_K` (8).
-3. **Relevance gate** (`_passes_relevance_gate`): if neither the raw similarity score nor the rerank score clears its threshold (`RELEVANCE_MIN_SCORE=0.62` raw, `RELEVANCE_MIN_RERANK_SCORE=0.0` rerank, OR'd — fails closed if rerank score is missing), refuse immediately without calling the LLM.
-4. **`generation.generate_answer()`**: build a grounded prompt from the surviving chunks, call Ollama (`qwen3.5:9b`, `"think": false` — see NOTES.md for why), get an answer.
-5. **`looks_like_refusal()`**: keyword pre-check, then (only if a keyword matched) semantic-similarity check against canonical refusal templates — decides whether this was actually a refusal even if the LLM didn't use an exact expected phrase.
-6. **Response** includes the answer, source documents, an `answered`/`refused` flag, and a `log_id` for human flagging (`/flag/{log_id}`) if applicable.
+1. **UI → `/ask`** dengan `{question, session_id}`.
+2. **`retrieval.retrieve()`**: embed pertanyaan, cari di ChromaDB (hybrid: dense + opsional sparse via RRF), rerank kandidat teratas dengan cross-encoder, terapkan boost (kecocokan identifier persis, kode dokumen sendiri, lompatan heading yang dikutip), dedupe potongan yang berulang (misalnya running header), potong hingga `TOP_K` (8).
+3. **Gerbang relevansi** (`_passes_relevance_gate`): jika baik skor kemiripan mentah maupun skor rerank sama-sama tidak melewati ambang batasnya (`RELEVANCE_MIN_SCORE=0.62` untuk raw, `RELEVANCE_MIN_RERANK_SCORE=0.0` untuk rerank, digabung dengan OR; gagal secara tertutup jika skor rerank tidak tersedia), tolak langsung tanpa memanggil LLM.
+4. **`generation.generate_answer()`**: bangun prompt yang berbasis pada potongan yang lolos, panggil Ollama (`qwen3.5:9b`, `"think": false`; lihat NOTES.md untuk alasannya), dapatkan jawaban.
+5. **`looks_like_refusal()`**: pre-check berbasis kata kunci, kemudian (hanya jika ada kata kunci yang cocok) pemeriksaan kemiripan semantik terhadap template penolakan kanonis; menentukan apakah ini sebenarnya penolakan meskipun LLM tidak menggunakan frasa persis yang diharapkan.
+6. **Respons** mencakup jawaban, dokumen sumber, flag `answered`/`refused`, dan `log_id` untuk penandaan oleh manusia (`/flag/{log_id}`) jika berlaku.
 
-Diagram/image-heavy pages get a VLM (`qwen2.5vl:7b`) description folded into their chunk text **at ingestion time**, not at answer time — the LLM never sees a raw image, only the pre-generated text description.
+Halaman yang padat diagram/gambar mendapat deskripsi VLM (`qwen2.5vl:7b`) yang digabungkan ke dalam teks potongannya **pada saat ingestion**, bukan pada saat menjawab; LLM tidak pernah melihat gambar mentah, hanya deskripsi teks yang telah dibuat sebelumnya.
 
-## 6. Key design decisions and why
+## 6. Keputusan desain utama dan alasannya
 
-- **Dual-signal relevance gate, not a single threshold.** Raw cosine similarity alone let some off-topic questions through; rerank score alone had its own gaps. OR-ing both, and failing closed when rerank is unavailable, kept false positives at 0.992 precision across the full 1,177-document corpus (see [`EVALUATION_RESULTS.md`](EVALUATION_RESULTS.md)).
-- **All ChromaDB access serialized through one thread.** ChromaDB is not safe for concurrent access from multiple threads/processes. Every retrieval call and every `/documents` metadata query goes through `retrieval.run_on_chroma_thread()`. Two real production bugs came from code that bypassed this pattern.
-- **VLM description caching, not just `temperature=0`.** The vision model is not fully deterministic even at temperature 0 (confirmed: likely GPU floating-point execution-order variance) — caching by content hash is what actually makes re-ingestion of unchanged files deterministic.
-- **Ingestion split into a parallelizable extraction phase and a serialized write phase.** PDF/OCR/VLM work is CPU/network-bound and shares no state, so it fans out across worker processes; ChromaDB/sqlite writes stay on one path to respect the concurrency constraint above.
-- **Precision over recall in the refusal decision.** The system would rather say "not found" than risk answering from content that isn't really there — a deliberate tradeoff for a compliance/contract document system, not an oversight.
-- **UI talks to the backend over HTTP only, never touches Chroma/sqlite directly.** This is what let the .NET frontend get built as a pure client-swap, with zero backend changes beyond one `FileResponse` content-disposition fix for inline PDF preview.
+- **Gerbang relevansi dua sinyal, bukan ambang batas tunggal.** Kemiripan kosinus mentah saja meloloskan beberapa pertanyaan di luar topik; skor rerank saja juga punya celah sendiri. Menggabungkan keduanya dengan OR, dan gagal tertutup saat rerank tidak tersedia, menjaga false positive pada presisi 0,992 di seluruh korpus 1.177 dokumen (lihat [`EVALUATION_RESULTS.md`](EVALUATION_RESULTS.md)).
+- **Semua akses ChromaDB diserialisasi lewat satu thread.** ChromaDB tidak aman untuk akses konkuren dari beberapa thread/proses. Setiap panggilan retrieval dan setiap query metadata `/documents` melewati `retrieval.run_on_chroma_thread()`. Dua bug produksi nyata muncul dari kode yang melewati pola ini.
+- **Caching deskripsi VLM, bukan sekadar `temperature=0`.** Model vision tidak sepenuhnya deterministik bahkan pada temperature 0 (telah dikonfirmasi: kemungkinan karena variasi urutan eksekusi floating-point pada GPU); caching berdasarkan content hash adalah yang sebenarnya membuat re-ingestion file yang tidak berubah menjadi deterministik.
+- **Ingestion dipecah menjadi fase ekstraksi yang dapat diparalelkan dan fase penulisan yang diserialisasi.** Pekerjaan PDF/OCR/VLM bersifat CPU/network-bound dan tidak berbagi state, sehingga dapat disebar ke beberapa worker process; penulisan ChromaDB/sqlite tetap berada pada satu jalur untuk menghormati batasan konkurensi di atas.
+- **Presisi lebih diutamakan daripada recall dalam keputusan penolakan.** Sistem lebih memilih mengatakan "tidak ditemukan" daripada mengambil risiko menjawab dari konten yang sebenarnya tidak ada; ini adalah tradeoff yang disengaja untuk sistem dokumen compliance/kontrak, bukan kelalaian.
+- **UI berkomunikasi dengan backend hanya lewat HTTP, tidak pernah menyentuh Chroma/sqlite secara langsung.** Inilah yang memungkinkan frontend .NET dibangun sebagai penggantian klien murni, tanpa perubahan backend apa pun selain satu perbaikan content-disposition pada `FileResponse` untuk preview PDF inline.
 
-## 7. Current model/tuning configuration (as of this doc)
+## 7. Konfigurasi model/tuning saat ini (per dokumen ini)
 
 | Setting | Value |
 |---|---|
-| LLM | `qwen3.5:9b` (Ollama, local), thinking mode disabled for latency |
-| VLM (diagram description) | `qwen2.5vl:7b` |
-| Embedding model | `paraphrase-multilingual-MiniLM-L12-v2` |
-| Reranker | `cross-encoder/mmarco-mMiniLMv2-L12-H384-v1` (GPU-capable, ~470MB) |
-| Retrieval top-k | 8 (after rerank of 35 candidates) |
-| Chunk size / overlap | 1,000 chars / 150 chars |
-| Relevance gate | raw ≥ 0.62 OR rerank ≥ 0.0, fails closed |
-| Ollama context window | 16,384 tokens |
+| LLM | `qwen3.5:9b` (Ollama, lokal), thinking mode dinonaktifkan demi latensi |
+| VLM (deskripsi diagram) | `qwen2.5vl:7b` |
+| Model embedding | `paraphrase-multilingual-MiniLM-L12-v2` |
+| Reranker | `cross-encoder/mmarco-mMiniLMv2-L12-H384-v1` (mendukung GPU, ~470MB) |
+| Top-k retrieval | 8 (setelah rerank dari 35 kandidat) |
+| Ukuran chunk / overlap | 1.000 karakter / 150 karakter |
+| Gerbang relevansi | raw ≥ 0,62 OR rerank ≥ 0,0, gagal tertutup |
+| Context window Ollama | 16.384 token |
 
-## 8. The backend API contract
+## 8. Kontrak API backend
 
-Both frontends (Streamlit and the Blazor Server website) are pure HTTP clients of this contract — no endpoint has ever needed to change for a new frontend to consume it. Run it with `uvicorn app.api:app` from inside `backend/`. **Every route is defined in `backend/app/api.py`** — file:line below is where to go read or change one.
+Kedua frontend (Streamlit dan situs web Blazor Server) merupakan klien HTTP murni terhadap kontrak ini; tidak ada endpoint yang pernah perlu diubah agar dapat dikonsumsi oleh frontend baru. Jalankan dengan `uvicorn app.api:app` dari dalam `backend/`. **Setiap rute didefinisikan di `backend/app/api.py`**; file:line di bawah ini adalah tempat untuk membaca atau mengubahnya.
 
 | Endpoint | File:line | What it does |
 |---|---|---|
-| `GET /health` | `backend/app/api.py:64` | `{status, model}` — used by both frontends' auto-launch logic to confirm the backend is up. |
-| `POST /ask` | `backend/app/api.py:69` | `{question, session_id?}` → answer(s), sources, `answered`/`refused`/`needs_clarification` flags, a `log_id` per answer. The one endpoint that calls `retrieval.py` + `generation.py` (see §2.2). |
-| `POST /sync` | `backend/app/api.py:97` | Triggers `sync_documents.sync_once()` — corpus reconciliation (new/changed/deleted files). |
-| `GET /sources` | `backend/app/api.py:102` | Raw list of indexed source filenames (`retrieval.list_indexed_sources()`) — lighter-weight than `/documents` below. |
-| `GET /documents` | `backend/app/api.py:118` | List of all indexed documents with type label, page count, size — what both frontends' sidebar/document list calls. |
-| `GET /documents/{filename}/preview` | `backend/app/api.py:158` | First-page text snippet + a base64 PNG thumbnail (Streamlit only used this; the Blazor website's preview panel uses `/download` + a native `<iframe>` instead). |
-| `GET /documents/{filename}/chunks` | `backend/app/api.py:188` | Live view of exactly what's currently indexed for a document — reads straight from ChromaDB on every call, debugging/QA tool, not used by either frontend's normal UI. |
-| `GET /documents/{filename}/download` | `backend/app/api.py:217` | Raw PDF, `Content-Disposition: inline` (set specifically for the Blazor website's `<iframe>` preview panel — see `dotnet/README.md`). |
-| `POST /flag/{log_id}` | `backend/app/api.py:228` | Human review flagging. `category`/`corrected_answer` are **query params, not a JSON body** — a real mistake both frontends' client code had to get right on purpose. |
-| `GET /export_flags` | `backend/app/api.py:239` | Dumps every flagged answer — operational/review tool, not used by either frontend's normal UI. |
-| `POST /sessions` | `backend/app/api.py:244` | Creates a new chat session, returns its `session_id`. |
-| `GET /sessions` | `backend/app/api.py:252` | List of sessions, most-recent-first, with an auto title (first message) and token totals. |
-| `GET /sessions/{id}/history` | `backend/app/api.py:260` | A session's saved messages (`role`/`content`/`created_at` only — no per-message sources or flag id, see `dotnet/README.md`'s known limitation note). |
-| `GET /monitor/status`, `GET /monitor` | `backend/app/api.py:283`, `:368` | JSON and HTML status page respectively — checks Ollama reachability live, self-contained (no separate frontend). |
+| `GET /health` | `backend/app/api.py:64` | `{status, model}`: digunakan oleh logika auto-launch kedua frontend untuk memastikan backend sudah berjalan. |
+| `POST /ask` | `backend/app/api.py:69` | `{question, session_id?}` → jawaban, sumber, flag `answered`/`refused`/`needs_clarification`, serta `log_id` per jawaban. Satu-satunya endpoint yang memanggil `retrieval.py` + `generation.py` (lihat §2.2). |
+| `POST /sync` | `backend/app/api.py:97` | Memicu `sync_documents.sync_once()`: rekonsiliasi korpus (file baru/berubah/dihapus). |
+| `GET /sources` | `backend/app/api.py:102` | Daftar mentah nama file sumber yang terindeks (`retrieval.list_indexed_sources()`); lebih ringan dibanding `/documents` di bawah. |
+| `GET /documents` | `backend/app/api.py:118` | Daftar semua dokumen terindeks beserta label tipe, jumlah halaman, ukuran; dipanggil oleh sidebar/daftar dokumen kedua frontend. |
+| `GET /documents/{filename}/preview` | `backend/app/api.py:158` | Cuplikan teks halaman pertama + thumbnail PNG base64 (hanya digunakan oleh Streamlit; panel preview situs Blazor menggunakan `/download` + `<iframe>` native). |
+| `GET /documents/{filename}/chunks` | `backend/app/api.py:188` | Tampilan langsung (live) atas apa yang sedang terindeks untuk sebuah dokumen: membaca langsung dari ChromaDB di setiap panggilan, merupakan alat debugging/QA, tidak digunakan oleh UI normal kedua frontend. |
+| `GET /documents/{filename}/download` | `backend/app/api.py:217` | PDF mentah, `Content-Disposition: inline` (diatur khusus untuk panel preview `<iframe>` situs Blazor; lihat `dotnet/README.md`). |
+| `POST /flag/{log_id}` | `backend/app/api.py:228` | Penandaan untuk tinjauan manusia. `category`/`corrected_answer` merupakan **query params, bukan JSON body**; kesalahan nyata yang harus dipastikan benar secara sengaja oleh kode klien kedua frontend. |
+| `GET /export_flags` | `backend/app/api.py:239` | Mengekspor semua jawaban yang ditandai: alat operasional/review, tidak digunakan oleh UI normal kedua frontend. |
+| `POST /sessions` | `backend/app/api.py:244` | Membuat sesi chat baru, mengembalikan `session_id`-nya. |
+| `GET /sessions` | `backend/app/api.py:252` | Daftar sesi, terbaru lebih dulu, dengan judul otomatis (pesan pertama) dan total token. |
+| `GET /sessions/{id}/history` | `backend/app/api.py:260` | Pesan tersimpan dari sebuah sesi (hanya `role`/`content`/`created_at`; tidak ada sumber per pesan atau flag id, lihat catatan keterbatasan yang diketahui di `dotnet/README.md`). |
+| `GET /monitor/status`, `GET /monitor` | `backend/app/api.py:283`, `:368` | Masing-masing berupa JSON dan halaman status HTML: memeriksa keterjangkauan Ollama secara langsung, berdiri sendiri (tanpa frontend terpisah). |
 
-Every filename-taking route goes through `_validated_path()` (`backend/app/api.py:107`): the filename must already be one of `retrieval.list_indexed_sources()`, never a raw path lookup — this is what stops path traversal onto arbitrary local files.
+Setiap rute yang menerima nama file melewati `_validated_path()` (`backend/app/api.py:107`): nama file harus sudah menjadi salah satu dari `retrieval.list_indexed_sources()`, tidak pernah berupa lookup path mentah; inilah yang mencegah path traversal ke file lokal sembarangan.
 
-See [`dotnet/README.md`](dotnet/README.md) for how the Blazor Server frontend specifically consumes this contract, including its own auto-launch logic for the backend.
+Lihat [`dotnet/README.md`](dotnet/README.md) untuk bagaimana frontend Blazor Server secara spesifik mengonsumsi kontrak ini, termasuk logika auto-launch-nya sendiri untuk backend.

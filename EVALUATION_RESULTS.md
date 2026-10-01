@@ -1,358 +1,358 @@
-# STK Online — Evaluation & Testing Results
+# STK Online - Hasil Evaluasi & Pengujian
 
-**Corpus:** 1,177 real internal documents (SOPs, contracts, TKO/TKI/TKPA procedures), PT Pertamina Drilling Services Indonesia (PDSI)
-**Scope:** every kind of testing/evaluation that exists in this project — what it checks, how to run it, and the latest real results.
+**Korpus:** 1.177 dokumen internal nyata (SOP, kontrak, prosedur TKO/TKI/TKPA), PT Pertamina Drilling Services Indonesia (PDSI)
+**Cakupan:** setiap jenis pengujian/evaluasi yang ada di proyek ini, apa yang diperiksa, cara menjalankannya, dan hasil terbaru yang sebenarnya.
 
-All numbers below are measured from real data (sqlite metadata, ChromaDB, checked-in eval reports, chunk logs, and git history) — nothing here is estimated without being labeled as such. This file merges what used to be two separate documents (`docs/EVALUATION_REPORT.md` and `docs/CM_STRESS_TEST_REPORT.md`) plus an inventory of every other testing script in the repo, so there's one place to look.
+Semua angka di bawah ini diukur dari data nyata (metadata sqlite, ChromaDB, laporan evaluasi yang sudah di-commit, log chunk, dan riwayat git). Tidak ada satu pun angka di sini yang berupa estimasi tanpa diberi label sebagai estimasi. File ini menggabungkan dua dokumen yang sebelumnya terpisah (`docs/EVALUATION_REPORT.md` dan `docs/CM_STRESS_TEST_REPORT.md`) ditambah inventaris semua skrip pengujian lain di repo, sehingga ada satu tempat rujukan.
 
 ---
 
-## 0. What kind of testing exists in this project
+## 0. Jenis pengujian apa saja yang ada di proyek ini
 
-| # | Type | Code | Objective | Result location |
+| # | Jenis | Kode | Tujuan | Lokasi hasil |
 |---|---|---|---|---|
-| 1 | **Unit tests** | `backend/app/test_units.py` | Pure-function logic (question splitting, etc.) — no Chroma/sqlite/Ollama, fast and deterministic. `python -m pytest app/test_units.py -v` | Pass/fail only, no report file |
-| 2 | **Extraction accuracy test** | `backend/testing/extraction_accuracy_test.py` | Renders two real pages from 15 deliberately varied real documents to PNG and runs them through the actual extraction pipeline, side by side, for a human (or VLM) to visually judge correctness | `backend/result/extraction_accuracy/report.md` — **gitignored**, contains real document content |
-| 3 | **QA correctness test** | `backend/testing/qa_correctness_test.py` | Ingests a subset of real documents, asks the live system real questions grounded in manually-verified content, plus a few out-of-scope trap questions | `backend/result/qa_correctness/report.md` + `raw_results.json` — **gitignored** |
-| 4 | **Grounded evaluation (confusion-matrix benchmark)** | `backend/app/evaluate_grounded.py` + `build_eval_questions.py` | Large auto-generated question set, ground truth always derived from what's actually indexed, scored against the live system across 5–7 categories; checkpointed/resumable | `backend/data/eval_report*.md` (several snapshots: default, `_catchup`, `_ambicheck`, historical `.v2`–`.v4`) — **gitignored** |
-| 5 | **Corpus integrity check** | `backend/app/check_corpus_integrity.py` | Not accuracy testing — a data-quality audit that catches PDFs with pages structurally belonging to a *different* document than the file's own name/cover implies | Prints findings directly, no report file |
-| 6 | **Manual live frontend verification** | — | Every phase of the Blazor Server website build was manually click-tested against the real running backend and real database, not mocked | Logged narratively in `NOTES.md` |
-| 7 | **The 1,346-question full-corpus stress test** (this file, §3 onward) | Orchestrated manually using #4's harness, not a standalone script | The big one: pushed the grounded-eval harness from an 11%-of-corpus sample to 99.7% coverage, and audited the *scoring code itself* for bugs, not just the system | **This file** |
+| 1 | **Unit test** | `backend/app/test_units.py` | Logika fungsi murni (pemecahan pertanyaan, dan lain-lain), tanpa Chroma/sqlite/Ollama, cepat dan deterministik. `python -m pytest app/test_units.py -v` | Hanya pass/fail, tanpa file laporan |
+| 2 | **Uji akurasi ekstraksi** | `backend/testing/extraction_accuracy_test.py` | Me-render dua halaman nyata dari 15 dokumen nyata yang sengaja dipilih bervariasi menjadi PNG dan menjalankannya melalui pipeline ekstraksi yang sesungguhnya, berdampingan, untuk dinilai kebenarannya secara visual oleh manusia (atau VLM) | `backend/result/extraction_accuracy/report.md`, **digitignore**, berisi konten dokumen nyata |
+| 3 | **Uji kebenaran QA** | `backend/testing/qa_correctness_test.py` | Melakukan ingestion pada subset dokumen nyata, mengajukan pertanyaan nyata ke sistem yang berjalan secara langsung berdasarkan konten yang telah diverifikasi secara manual, ditambah beberapa pertanyaan jebakan di luar cakupan | `backend/result/qa_correctness/report.md` + `raw_results.json`, **digitignore** |
+| 4 | **Evaluasi grounded (benchmark confusion-matrix)** | `backend/app/evaluate_grounded.py` + `build_eval_questions.py` | Kumpulan pertanyaan besar yang dibuat otomatis, ground truth selalu diturunkan dari data yang benar-benar terindeks, dinilai terhadap sistem yang berjalan langsung di 5-7 kategori; dapat di-checkpoint/dilanjutkan | `backend/data/eval_report*.md` (beberapa snapshot: default, `_catchup`, `_ambicheck`, historis `.v2`-`.v4`), **digitignore** |
+| 5 | **Pemeriksaan integritas korpus** | `backend/app/check_corpus_integrity.py` | Bukan pengujian akurasi, melainkan audit kualitas data yang menangkap PDF dengan halaman yang secara struktural milik dokumen *lain* daripada yang diisyaratkan oleh nama/sampul file itu sendiri | Mencetak temuan langsung, tanpa file laporan |
+| 6 | **Verifikasi manual frontend secara langsung** | - | Setiap fase pembangunan situs Blazor Server diuji klik secara manual terhadap backend nyata yang berjalan dan database nyata, tidak disimulasikan | Dicatat secara naratif di `NOTES.md` |
+| 7 | **Uji stres korpus penuh 1.346 pertanyaan** (file ini, §3 dan seterusnya) | Diorkestrasi secara manual menggunakan harness dari #4, bukan skrip tersendiri | Yang terbesar: mendorong harness grounded-eval dari sampel 11% korpus menjadi cakupan 99,7%, sekaligus mengaudit *kode penilaian itu sendiri* untuk mencari bug, bukan hanya sistemnya | **File ini** |
 
-Items 2–4's raw result files are gitignored on purpose — see `.gitignore`'s comments: real document content (headings, contract text, even one employee's COVID-test letter referenced by filename) never leaves local machines, even into a private repo. What follows is the scrubbed, aggregate numbers from the latest runs of each.
+File hasil mentah pada butir 2-4 sengaja di-gitignore, lihat komentar pada `.gitignore`: konten dokumen nyata (judul, teks kontrak, bahkan surat hasil tes COVID salah satu karyawan yang dirujuk lewat nama file) tidak boleh keluar dari mesin lokal, bahkan ke repo privat sekalipun. Berikut ini adalah angka agregat yang sudah disaring dari hasil terbaru masing-masing pengujian.
 
 ---
 
-## 1. Corpus & index scale
+## 1. Skala korpus & indeks
 
-| Metric | Value |
+| Metrik | Nilai |
 |---|---|
-| Documents indexed | 1,177 |
-| Total pages | 18,818 |
-| Total corpus size | ~1.32 GB (avg ~1.15 MB/doc) |
-| Vector chunks indexed (ChromaDB) | 62,918 |
-| Avg chunks per document | ~53.5 |
-| Avg chunks per page | ~3.3 |
-| Headings extracted (sqlite) | 31,222 |
-| VLM diagram-description cache entries | 3 (diagram-heavy pages are rare in this corpus) |
+| Dokumen terindeks | 1.177 |
+| Total halaman | 18.818 |
+| Ukuran total korpus | ~1,32 GB (rata-rata ~1,15 MB/dokumen) |
+| Chunk vektor terindeks (ChromaDB) | 62.918 |
+| Rata-rata chunk per dokumen | ~53,5 |
+| Rata-rata chunk per halaman | ~3,3 |
+| Heading yang diekstrak (sqlite) | 31.222 |
+| Entri cache deskripsi diagram VLM | 3 (halaman kaya diagram memang jarang di korpus ini) |
 
-## 2. Ingestion performance
+## 2. Performa ingestion
 
-Ingestion happened incrementally across the project's development timeline (dev/test batches, a main bulk run, then targeted re-ingestion while fixing specific bugs) — not as one uninterrupted execution, so raw wall-clock time from first file to last file is not a meaningful "how long does ingestion take" number.
+Ingestion dilakukan secara bertahap sepanjang garis waktu pengembangan proyek (batch dev/test, satu proses massal utama, lalu re-ingestion tertarget saat memperbaiki bug tertentu), bukan dalam satu eksekusi tanpa jeda. Karena itu, waktu wall-clock mentah dari file pertama sampai file terakhir bukan angka "berapa lama ingestion berlangsung" yang bermakna.
 
-| Run | Files | Duration | Throughput |
+| Proses | File | Durasi | Throughput |
 |---|---|---|---|
-| Largest continuous bulk run (parallelized, steady state) | 700 docs | 148.1 min | **12.7 sec/doc** |
-| Second-largest continuous run | 189 docs | 103.7 min | 32.9 sec/doc |
-| Smaller batches (dev/test phase, before parallelization tuning) | 14–95 docs each | — | 19–104 sec/doc |
+| Proses massal berkelanjutan terbesar (diparalelkan, kondisi stabil) | 700 dokumen | 148,1 menit | **12,7 detik/dokumen** |
+| Proses berkelanjutan terbesar kedua | 189 dokumen | 103,7 menit | 32,9 detik/dokumen |
+| Batch lebih kecil (fase dev/test, sebelum penyetelan paralelisasi) | 14-95 dokumen per batch | - | 19-104 detik/dokumen |
 
-**Extrapolated full-corpus ingestion time, one continuous run, at steady-state throughput:** `1,177 docs × 12.7 sec/doc ≈ 4 hours 9 minutes` — a derived figure (throughput × document count), not a single measured end-to-end run.
+**Ekstrapolasi waktu ingestion korpus penuh, satu proses berkelanjutan, pada throughput kondisi stabil:** `1.177 dokumen × 12,7 detik/dokumen ≈ 4 jam 9 menit`, sebuah angka turunan (throughput dikali jumlah dokumen), bukan satu pengukuran end-to-end tunggal.
 
-### Why ingestion isn't a fixed per-document cost
+### Mengapa ingestion bukan biaya tetap per dokumen
 
-Each document goes through: PDF text extraction → OCR fallback for scanned/broken-text pages → rotation correction (Tesseract OSD) → VLM diagram description for graphical pages → structure-aware chunking → embedding → indexing. A clean, all-text, no-diagram document costs a few seconds; a scanned, rotated, diagram-heavy document costs a minute or more. VLM description results are cached by content hash, so re-ingesting an *unchanged* file is fast regardless of how expensive it was the first time.
+Setiap dokumen melewati tahap: ekstraksi teks PDF → fallback OCR untuk halaman hasil pindai/teks rusak → koreksi rotasi (Tesseract OSD) → deskripsi diagram VLM untuk halaman bergambar → chunking yang sadar struktur → embedding → pengindeksan. Dokumen yang bersih, seluruhnya teks, tanpa diagram, hanya memakan waktu beberapa detik; dokumen hasil pindai, miring, dan kaya diagram bisa memakan waktu semenit lebih. Hasil deskripsi VLM di-cache berdasarkan hash konten, sehingga mengulang ingestion pada file yang *tidak berubah* tetap cepat, berapa pun mahalnya proses pertama kali.
 
 ---
 
-## 3. Grounded evaluation — what it measures and how
+## 3. Evaluasi grounded: apa yang diukur dan caranya
 
-The system has no external benchmark to compare against (proprietary Indonesian-language internal corpus — no public RAG benchmark fits it), so the evaluation is a self-built, growing grounded test set.
+Sistem ini tidak memiliki benchmark eksternal untuk dibandingkan (korpus internal berbahasa Indonesia yang proprietary, tidak ada benchmark RAG publik yang cocok), sehingga evaluasi dilakukan dengan set uji grounded yang dibangun sendiri dan terus berkembang.
 
-**Five generations exist, each deliberately harder than the last:**
+**Ada lima generasi, masing-masing sengaja dibuat lebih sulit dari sebelumnya:**
 
-| Generation | Questions | Files covered | What changed |
+| Generasi | Jumlah pertanyaan | File yang dicakup | Apa yang berubah |
 |---|---|---|---|
-| v1 (2026-09-27) | 100 | 60 of 1,177 (~5%) | 3 categories, 82% exact-quote heading lookups — the easiest case |
-| v2 (2026-09-29) | 100 | 97 (~8%) | Adds **procedural** (natural phrasing, no verbatim quote) and **cross-document discovery** categories |
-| v3 (2026-09-29) | 100 | 118 (~10%) | Same 5 categories, but prefers the *deepest* available sub-heading instead of top-level ones — targets the eval's own known weak spot |
-| v4 (2026-09-29) | 100 | 126 (~11%) | Adds a **~50/50 no-filename split** on Answerable/Procedural (realistic: a real user rarely names the exact file) plus a new **ambiguous-identifier** category |
-| **v5 (2026-09-30, this report)** | **1,346** | **1,174 (99.7%)** | Full-corpus scale — see §4 onward |
+| v1 (2026-09-27) | 100 | 60 dari 1.177 (~5%) | 3 kategori, 82% pencarian heading dengan kutipan persis, kasus termudah |
+| v2 (2026-09-29) | 100 | 97 (~8%) | Menambahkan kategori **prosedural** (frasa alami, tanpa kutipan verbatim) dan **penemuan lintas dokumen** |
+| v3 (2026-09-29) | 100 | 118 (~10%) | Masih 5 kategori yang sama, tetapi mengutamakan sub-heading *paling dalam* yang tersedia alih-alih yang level atas, menyasar titik lemah yang sudah diketahui dari evaluasi itu sendiri |
+| v4 (2026-09-29) | 100 | 126 (~11%) | Menambahkan pembagian **sekitar 50/50 tanpa-nama-file** pada Answerable/Procedural (realistis: pengguna nyata jarang menyebut nama file secara persis) ditambah kategori baru **identifier ambigu** |
+| **v5 (2026-09-30, laporan ini)** | **1.346** | **1.174 (99,7%)** | Skala korpus penuh, lihat §4 dan seterusnya |
 
-**The seven categories tested at v5 scale**, each a different failure mode:
+**Tujuh kategori yang diuji pada skala v5**, masing-masing mewakili mode kegagalan yang berbeda:
 
-| Category | Count (1k run / catch-up) | What it tests | Real example |
+| Kategori | Jumlah (uji 1k / catch-up) | Apa yang diuji | Contoh nyata |
 |---|---|---|---|
-| **Answerable** | 450 / 262 | Can the system find an exact heading/section and quote its content correctly? ~50/50 with/without the source filename named. | *"Apa isi bagian 'VI. INTRUKSI KERJA'?"* (no filename) |
-| **Procedural** | 250 / 35 | Can it answer a natural-language "how do I..." question, not just an exact-quote lookup? Same ~50/50 split. | *"Jelaskan cara AC generator pemeliharaan."* |
-| **Cross-Document** | 100 / — | Given a broad topic (no filename), does it find *all* the right documents, not just one? | *"Dokumen mana saja yang membahas tentang [topic] secara umum?"* |
-| **Should-Refuse** | 120 / — | Does it correctly decline an off-topic or fabricated question instead of hallucinating? | *"Apa penyebab terjadinya gerhana matahari total?"* (solar eclipse, against a drilling-operations corpus) |
-| **Ambiguous-Identifier** | 40 / — | Given a bare identifier that exists in multiple documents (no filename), does it ask for clarification instead of guessing? | *"Apa isi Lampiran 12?"* (shared by 15 real documents — the category that caught the real bug in §6) |
-| **Enumerate** | 80 / — | Can it produce a complete list (all attachments, all sections) rather than a partial one? | *"Sebutkan semua lampiran yang ada di dokumen C-008-...pdf."* |
-| **Whole-Document** | — / 49 | For files with no extractable headings at all, can it still summarize the document from a plain "what is this about" question? | *"Apa isi dokumen A-007-...pdf secara umum?"* |
+| **Answerable** | 450 / 262 | Apakah sistem dapat menemukan heading/bagian yang tepat dan mengutip isinya dengan benar? Sekitar 50/50 antara dengan/tanpa penyebutan nama file sumber. | *"Apa isi bagian 'VI. INTRUKSI KERJA'?"* (tanpa nama file) |
+| **Procedural** | 250 / 35 | Apakah sistem dapat menjawab pertanyaan "bagaimana cara..." dalam bahasa alami, bukan sekadar pencarian kutipan persis? Pembagian sekitar 50/50 yang sama. | *"Jelaskan cara AC generator pemeliharaan."* |
+| **Cross-Document** | 100 / - | Diberi topik luas (tanpa nama file), apakah sistem menemukan *semua* dokumen yang relevan, bukan cuma satu? | *"Dokumen mana saja yang membahas tentang [topik] secara umum?"* |
+| **Should-Refuse** | 120 / - | Apakah sistem menolak dengan benar pertanyaan yang di luar topik atau fiktif, alih-alih berhalusinasi? | *"Apa penyebab terjadinya gerhana matahari total?"* (gerhana matahari, dibandingkan dengan korpus operasi pengeboran) |
+| **Ambiguous-Identifier** | 40 / - | Diberi identifier telanjang yang muncul di banyak dokumen (tanpa nama file), apakah sistem meminta klarifikasi alih-alih menebak? | *"Apa isi Lampiran 12?"* (dimiliki bersama oleh 15 dokumen nyata, kategori yang menangkap bug nyata pada §6) |
+| **Enumerate** | 80 / - | Apakah sistem dapat menghasilkan daftar lengkap (semua lampiran, semua bagian), bukan daftar sebagian? | *"Sebutkan semua lampiran yang ada di dokumen C-008-...pdf."* |
+| **Whole-Document** | - / 49 | Untuk file tanpa heading yang dapat diekstrak sama sekali, dapatkah sistem tetap merangkum dokumen dari pertanyaan sederhana "ini tentang apa"? | *"Apa isi dokumen A-007-...pdf secara umum?"* |
 
-**Why the with/without-filename split matters:** dropping the filename is the realistic case — a real user rarely types the exact document name. It's also the harder case: without one, the system has to find the right document from retrieval alone. No-filename questions performed *as well or better* than with-filename questions on several v5 metrics — a reassuring sign the system isn't secretly relying on the filename as a crutch.
+**Mengapa pembagian dengan/tanpa nama file ini penting:** menghilangkan nama file adalah kasus yang realistis, karena pengguna nyata jarang mengetik nama dokumen secara persis. Ini juga kasus yang lebih sulit: tanpa nama file, sistem harus menemukan dokumen yang tepat hanya dari retrieval saja. Pertanyaan tanpa nama file justru tampil *sama baik atau lebih baik* dibanding pertanyaan dengan nama file pada beberapa metrik v5, sebuah tanda yang melegakan bahwa sistem tidak diam-diam bergantung pada nama file sebagai jalan pintas.
 
-**Eval runtime (100-question runs):** ~25–30 minutes (individual questions range from a few seconds to the full-document-fallback path's multi-minute ceiling).
+**Waktu eksekusi evaluasi (uji 100 pertanyaan):** ~25-30 menit (pertanyaan individual berkisar dari beberapa detik hingga batas atas jalur fallback dokumen penuh yang bisa memakan beberapa menit).
 
-### What "positive" means here, and what counts as FP/TP/FN/TN
+### Apa makna "positif" di sini, dan apa yang terhitung sebagai FP/TP/FN/TN
 
-The confusion matrix treats **"the system attempted an answer" as positive**, **"the system refused"** as negative, covering only Answerable, Procedural, and Should-Refuse (the three that fit a clean binary decision):
+Confusion matrix memperlakukan **"sistem mencoba menjawab" sebagai positif**, dan **"sistem menolak"** sebagai negatif, hanya mencakup Answerable, Procedural, dan Should-Refuse (tiga kategori yang cocok dengan keputusan biner yang bersih):
 
-| | Question was actually answerable | Question should have been refused |
+| | Pertanyaan sebenarnya dapat dijawab | Pertanyaan seharusnya ditolak |
 |---|---|---|
-| **System answered** | **TP** — correct | **FP** — wrong and dangerous: hallucination |
-| **System refused** | **FN** — overly cautious | **TN** — correct |
+| **Sistem menjawab** | **TP**, benar | **FP**, salah dan berbahaya: halusinasi |
+| **Sistem menolak** | **FN**, terlalu berhati-hati | **TN**, benar |
 
-**FP is the failure mode that matters most for a compliance/contract document system** — the system is deliberately tuned to minimize FP even at some cost to FN.
+**FP adalah mode kegagalan yang paling penting untuk sistem dokumen kepatuhan/kontrak.** Sistem ini sengaja disetel untuk meminimalkan FP, bahkan dengan sedikit mengorbankan FN.
 
-Cross-Document, Enumerate, and Whole-Document don't fit this binary (they're not an answer/refuse decision), so each is scored on its own dedicated metrics in §7–§8, never folded into the matrix above — see §5, Bug 1, for why that distinction had to be fixed in the first place.
-
----
-
-## 4. Scoring-methodology bugs found and fixed
-
-Before trusting any confusion-matrix number, **the scoring code itself was audited** by deliberately designing question categories built to break it — three real bugs were found this way, each one silently changing what "Precision" or "Recall" meant, independent of the system's actual behavior.
-
-### Bug 1 (found during v2): Cross-Document "wrong discovery" folded into the same FP counter as real hallucinations
-
-- **Root cause:** the Cross-Document category's results (answered, but returned documents didn't overlap a narrow heading-based ground truth) were counted as the same failure as the system inventing an answer to a fabricated question.
-- **Evidence:** traced 4 flagged "FP" cases to raw data — 3 of 4 were the system finding a *more* relevant document than the ground truth captured (e.g. returning a document literally titled `RIG_DOWN_RIG.PDF` for a "rigging down" question, correct but not in the narrow expected set).
-- **Fix & before/after:** Cross-Document scored only in its own dedicated metrics (§7). Precision read **0.944** before the fix, **1.0** after — same underlying answers, correct accounting.
-
-### Bug 2 (found during v4 design): a clarification request silently counted as "answered"
-
-- **Root cause:** every scoring function checked `answered = not looks_like_refusal(text)` — that function only recognizes refusal phrasing ("tidak ditemukan"), never a clarification request ("Mohon sebutkan dokumen yang dimaksud") as *also* not a real answer.
-- **Fix:** one shared `_really_answered()` helper checks for a `ClarificationNeeded` result first, used consistently across every scoring function.
-
-### Bug 3 (found via code review, v4): the bare-identifier ambiguity check was unreachable dead code
-
-- **Root cause:** `retrieval.detect_ambiguity()` was only ever called from a branch that requires a document to already be named — but it immediately returns `None` whenever a document *is* named (it's designed for the opposite case). Every bare ambiguous question silently got a guessed answer instead of a clarification request — a real live-product bug, not just an eval artifact.
-- **Fix:** moved the check into the branch where it can actually fire. Verified live: *"Apa isi Lampiran 9?"* (66 real candidate documents) now correctly triggers clarification.
+Cross-Document, Enumerate, dan Whole-Document tidak cocok dengan skema biner ini (bukan keputusan jawab/tolak), sehingga masing-masing dinilai dengan metrik khususnya sendiri di §7-§8, dan tidak pernah dimasukkan ke dalam matriks di atas. Lihat §5, Bug 1, untuk alasan mengapa pemisahan ini harus diperbaiki sejak awal.
 
 ---
 
-## 5. Results: 100-question runs (v1–v4)
+## 4. Bug pada metodologi penilaian yang ditemukan dan diperbaiki
 
-| Metric | v1 | v2 | v3 | v4 | **v5 (1,000 q)** | What it means |
+Sebelum mempercayai angka confusion-matrix mana pun, **kode penilaian itu sendiri diaudit** dengan sengaja merancang kategori pertanyaan yang dibuat untuk mematahkannya. Dengan cara ini ditemukan tiga bug nyata, masing-masing diam-diam mengubah makna "Precision" atau "Recall", terlepas dari perilaku sistem yang sebenarnya.
+
+### Bug 1 (ditemukan saat v2): "penemuan yang salah" pada Cross-Document dimasukkan ke penghitung FP yang sama dengan halusinasi sungguhan
+
+- **Akar masalah:** hasil kategori Cross-Document (sistem menjawab, tetapi dokumen yang dikembalikan tidak tumpang tindih dengan ground truth berbasis heading yang sempit) dihitung sebagai kegagalan yang sama dengan sistem yang mengarang jawaban untuk pertanyaan fiktif.
+- **Bukti:** menelusuri 4 kasus "FP" yang ditandai kembali ke data mentah, 3 dari 4 kasus ternyata sistem menemukan dokumen yang *lebih* relevan daripada yang tercatat di ground truth (misalnya mengembalikan dokumen yang judulnya secara harfiah `RIG_DOWN_RIG.PDF` untuk pertanyaan tentang "rigging down", benar tetapi tidak termasuk dalam set yang diharapkan secara sempit).
+- **Perbaikan & sebelum/sesudah:** Cross-Document kini hanya dinilai dengan metrik khususnya sendiri (§7). Precision terbaca **0,944** sebelum perbaikan, **1,0** setelahnya, jawaban yang mendasarinya sama, hanya perhitungannya yang diperbaiki.
+
+### Bug 2 (ditemukan saat perancangan v4): permintaan klarifikasi diam-diam dihitung sebagai "terjawab"
+
+- **Akar masalah:** setiap fungsi penilaian memeriksa `answered = not looks_like_refusal(text)`. Fungsi tersebut hanya mengenali frasa penolakan ("tidak ditemukan"), tetapi tidak pernah mengenali permintaan klarifikasi ("Mohon sebutkan dokumen yang dimaksud") sebagai sesuatu yang *juga* bukan jawaban sungguhan.
+- **Perbaikan:** satu helper bersama `_really_answered()` memeriksa hasil `ClarificationNeeded` terlebih dahulu, dan digunakan secara konsisten di semua fungsi penilaian.
+
+### Bug 3 (ditemukan lewat tinjauan kode, v4): pemeriksaan ambiguitas identifier telanjang adalah kode mati yang tidak pernah tercapai
+
+- **Akar masalah:** `retrieval.detect_ambiguity()` hanya pernah dipanggil dari cabang yang mensyaratkan dokumen sudah disebutkan namanya, padahal fungsi itu langsung mengembalikan `None` setiap kali dokumen *memang* disebutkan (fungsi ini dirancang untuk kasus sebaliknya). Setiap pertanyaan ambigu telanjang diam-diam mendapat jawaban tebakan, bukan permintaan klarifikasi, sebuah bug produk nyata yang sedang berjalan, bukan sekadar artefak evaluasi.
+- **Perbaikan:** memindahkan pemeriksaan ke cabang tempat pemeriksaan itu benar-benar bisa aktif. Diverifikasi secara langsung: *"Apa isi Lampiran 9?"* (66 dokumen kandidat nyata) kini memicu klarifikasi dengan benar.
+
+---
+
+## 5. Hasil: uji 100 pertanyaan (v1-v4)
+
+| Metrik | v1 | v2 | v3 | v4 | **v5 (1.000 pertanyaan)** | Artinya |
 |---|---|---|---|---|---|---|
-| Precision | 1.0 | 1.0 | 1.0 | 0.984 | **0.992** | Improved further at 10x scale — only 1 of 5 v5 FPs was a real defect (now fixed). |
-| Recall | 0.767 | 0.877 | 0.849 | 0.875 | **0.874** | Essentially flat despite far deeper/harder sub-headings at full-corpus scale — real figure is likely higher, see §6. |
-| F1 | 0.868 | 0.934 | 0.919 | 0.926 | **0.929** | |
-| Accuracy | 0.835 | 0.896 | 0.864 | 0.875 | **0.887** | |
+| Precision | 1,0 | 1,0 | 1,0 | 0,984 | **0,992** | Membaik lebih jauh pada skala 10x, hanya 1 dari 5 FP v5 yang merupakan cacat nyata (kini sudah diperbaiki). |
+| Recall | 0,767 | 0,877 | 0,849 | 0,875 | **0,874** | Pada dasarnya datar meskipun sub-heading jauh lebih dalam/sulit pada skala korpus penuh, angka sebenarnya kemungkinan lebih tinggi, lihat §6. |
+| F1 | 0,868 | 0,934 | 0,919 | 0,926 | **0,929** | |
+| Accuracy | 0,835 | 0,896 | 0,864 | 0,875 | **0,887** | |
 
-**Retrieval-quality metrics (Answerable + Procedural, independent of the answer/refuse decision):**
+**Metrik kualitas retrieval (Answerable + Procedural, terlepas dari keputusan jawab/tolak):**
 
-| Metric | v2 Answerable | v3 Answerable | v4 Answerable | v2 Procedural | v3 Procedural | v4 Procedural |
+| Metrik | v2 Answerable | v3 Answerable | v4 Answerable | v2 Procedural | v3 Procedural | v4 Procedural |
 |---|---|---|---|---|---|---|
-| Exact document hit rate | 0.85 | 0.911 | 0.867 | 0.88 | 0.929 | **1.0** |
-| Exact page hit rate | 0.675 | 0.822 | 0.778 | 0.64 | 0.786 | **0.929** |
-| Content-correctness (word overlap) | 0.267 | 0.218 | 0.199 | 0.263 | 0.261 | 0.251 |
+| Tingkat ketepatan dokumen | 0,85 | 0,911 | 0,867 | 0,88 | 0,929 | **1,0** |
+| Tingkat ketepatan halaman | 0,675 | 0,822 | 0,778 | 0,64 | 0,786 | **0,929** |
+| Kebenaran konten (word overlap) | 0,267 | 0,218 | 0,199 | 0,263 | 0,261 | 0,251 |
 
-**Caveat on content-correctness:** this score is word overlap between the system's answer and a gold snippet, which penalizes correct-but-paraphrased answers — a low average does not mean most answers are wrong, it means this metric is a blunt instrument, best read alongside manual spot-checks.
+**Catatan tentang kebenaran konten:** skor ini adalah tumpang tindih kata antara jawaban sistem dan kutipan emas, yang menghukum jawaban yang benar tetapi diparafrasekan. Rata-rata yang rendah bukan berarti sebagian besar jawaban salah, melainkan menunjukkan bahwa metrik ini adalah alat ukur yang kasar, sebaiknya dibaca bersama pemeriksaan manual secara acak.
 
 ---
 
-## 6. The 1,000-question run (full corpus, 2026-09-30)
+## 6. Uji 1.000 pertanyaan (korpus penuh, 2026-09-30)
 
-1,000/1,000 completed, **0 runtime errors**, 828 of 1,177 distinct files referenced.
+1.000/1.000 selesai, **0 kesalahan runtime**, 828 dari 1.177 file berbeda yang dirujuk.
 
-**Confusion matrix (positive = system answered rather than refused):**
+**Confusion matrix (positif = sistem menjawab, bukan menolak):**
 
-| | Actual: Answerable/Procedural | Actual: Should Refuse |
+| | Sebenarnya: Answerable/Procedural | Sebenarnya: Should Refuse |
 |---|---|---|
-| **Predicted: Answer** | TP = 612 | FP = 5 |
-| **Predicted: Refuse** | FN = 88 | TN = 115 |
+| **Prediksi: Menjawab** | TP = 612 | FP = 5 |
+| **Prediksi: Menolak** | FN = 88 | TN = 115 |
 
-### Where the 88 "false negatives" actually came from
+### Dari mana sebenarnya 88 "false negative" ini berasal
 
-Every one was traced by what retrieval actually found, not just counted:
+Setiap kasus ditelusuri berdasarkan apa yang sebenarnya ditemukan retrieval, bukan sekadar dihitung:
 
-| Retrieval outcome | Count | Share | Interpretation |
+| Hasil retrieval | Jumlah | Proporsi | Interpretasi |
 |---|---|---|---|
-| Correct document AND page retrieved, still refused | 56 | 64% | Live-sampled 5 outside the harness: 4 of 5 were the system correctly declining to invent content — the matched heading was a table-of-contents pointer or cross-reference with no real body text. Honest, correct behavior, not a retrieval failure. |
-| Genuine retrieval miss (wrong document) | 24 | 27% | Consistent with the known weak spot: short, generic sub-headings at full-corpus scale. |
-| Right document, wrong page | 8 | 9% | Genuine page-level retrieval limitation. |
+| Dokumen DAN halaman yang benar berhasil diambil, tetap ditolak | 56 | 64% | Sampel langsung 5 kasus di luar harness: 4 dari 5 adalah sistem yang dengan benar menolak mengarang konten, heading yang cocok ternyata adalah penunjuk daftar isi atau referensi silang tanpa isi teks sungguhan. Perilaku jujur dan benar, bukan kegagalan retrieval. |
+| Kegagalan retrieval sungguhan (dokumen salah) | 24 | 27% | Konsisten dengan titik lemah yang sudah diketahui: sub-heading yang pendek dan generik pada skala korpus penuh. |
+| Dokumen benar, halaman salah | 8 | 9% | Keterbatasan retrieval level halaman yang sungguhan. |
 
-**Net effect: real recall is meaningfully higher than 0.874 suggests**, since a majority of counted FNs are the system correctly declining to invent content that isn't there. No numeric recompute was attempted (would require manually re-classifying all 56 against source PDFs) — the finding is the *direction and rough magnitude* of the effect, reported honestly rather than papered over.
+**Dampak bersih: recall sebenarnya kemungkinan lebih tinggi secara berarti daripada yang ditunjukkan angka 0,874**, karena mayoritas FN yang terhitung adalah sistem yang dengan benar menolak mengarang konten yang memang tidak ada. Tidak dilakukan penghitungan ulang secara numerik (itu membutuhkan reklasifikasi manual terhadap semua 56 kasus dibandingkan PDF sumber), temuan ini adalah *arah dan perkiraan besaran* efeknya, dilaporkan secara jujur dan tidak ditutup-tutupi.
 
-### The 5 false positives, traced individually
+### Penelusuran kelima false positive satu per satu
 
-- **4 were "Pasal 9999" (deliberately fabricated clause number) questions.** A fresh re-run outside the harness reproduced a correct refusal, not a hallucination — borderline non-determinism at the refusal-detection boundary, not a reproducible defect.
-- **1 was a real, reproducible bug** — see below.
+- **4 kasus adalah pertanyaan "Pasal 9999" (nomor klausul yang sengaja dikarang).** Pengujian ulang segar di luar harness menghasilkan penolakan yang benar, bukan halusinasi, menunjukkan non-determinisme tipis di batas deteksi penolakan, bukan cacat yang dapat direproduksi.
+- **1 kasus adalah bug nyata yang dapat direproduksi**, lihat di bawah.
 
-## 7. The one real bug: ambiguity detection didn't scale to a full corpus
+## 7. Satu bug nyata: deteksi ambiguitas tidak dapat diskalakan ke korpus penuh
 
-### "Apa isi Lampiran 12?" — heading shared by 15 documents, system answered anyway
+### "Apa isi Lampiran 12?", heading yang dimiliki bersama oleh 15 dokumen, sistem tetap menjawab
 
-- **Root cause:** the ambiguity check compared only the **top-1 vs. top-2** reranked relevance score — reliable when there's one clear winner vs. one clear runner-up, but "Lampiran 12" genuinely appears as a heading in 15 real documents, and only *one* had enough body text under that heading to score decisively ahead of the rest. A wide score gap despite 14 other equally valid candidates: the check was measuring "which document has more content here," not "is this identifier actually generic."
-- **Fix:** replaced the score-gap heuristic with a **structural heading-count check** — the exact same (identifier → source documents) logic the eval's own ground-truth builder already uses, so detection and ground truth now agree by construction instead of two independently-tuned thresholds.
+- **Akar masalah:** pemeriksaan ambiguitas hanya membandingkan skor relevansi hasil rerank **top-1 vs top-2**, yang cukup andal saat ada satu pemenang jelas versus satu runner-up jelas, tetapi "Lampiran 12" memang muncul sebagai heading di 15 dokumen nyata, dan hanya *satu* yang memiliki cukup isi teks di bawah heading itu untuk mendapat skor yang jauh lebih unggul dari yang lain. Celah skor yang lebar meskipun ada 14 kandidat lain yang sama validnya: pemeriksaan ini sebenarnya mengukur "dokumen mana yang punya lebih banyak konten di sini", bukan "apakah identifier ini memang generik."
+- **Perbaikan:** mengganti heuristik celah skor dengan **pemeriksaan struktural jumlah heading**, yaitu logika (identifier → dokumen sumber) yang persis sama dengan yang sudah digunakan oleh pembangun ground truth milik evaluasi itu sendiri, sehingga deteksi dan ground truth kini selaras secara konstruksi, bukan dua ambang batas yang disetel secara terpisah.
 
-**Verification — before:**
+**Verifikasi, sebelum:**
 
-| Identifier | Real candidate docs | Old behavior |
+| Identifier | Dokumen kandidat nyata | Perilaku lama |
 |---|---|---|
-| Lampiran 12 | 14 | Bug — answered anyway |
-| Lampiran 9 | 66 | Correct — asked to clarify |
-| Pasal 8 | 0 (not ambiguous) | Correct — answered |
+| Lampiran 12 | 14 | Bug, tetap menjawab |
+| Lampiran 9 | 66 | Benar, meminta klarifikasi |
+| Pasal 8 | 0 (tidak ambigu) | Benar, menjawab |
 
-**Verification — after fix, live end-to-end re-check:** `generate_answer("Apa isi Lampiran 12?")` now returns a clarification request listing all 14 real candidate documents. Previously-settled cases (Lampiran 9, Pasal 8) unaffected. Full 43-test unit suite still passes.
+**Verifikasi, setelah perbaikan, pemeriksaan ulang langsung end-to-end:** `generate_answer("Apa isi Lampiran 12?")` kini mengembalikan permintaan klarifikasi yang mencantumkan semua 14 dokumen kandidat nyata. Kasus yang sebelumnya sudah selesai (Lampiran 9, Pasal 8) tidak terpengaruh. Seluruh 43 unit test tetap lulus.
 
-**Verification — isolated re-run of the exact category that exercises this code** (40 `ambiguous_identifier` questions, 62.8 seconds total, not the full 1,000-question set):
+**Verifikasi, pengujian ulang terisolasi pada kategori yang persis menjalankan kode ini** (40 pertanyaan `ambiguous_identifier`, total 62,8 detik, bukan keseluruhan set 1.000 pertanyaan):
 
-| | Before fix | After fix |
+| | Sebelum perbaikan | Setelah perbaikan |
 |---|---|---|
-| Correctly refused / clarified | 39 / 40 | **40 / 40** |
-| Accuracy | 0.975 | **1.000** |
+| Ditolak/diklarifikasi dengan benar | 39 / 40 | **40 / 40** |
+| Accuracy | 0,975 | **1,000** |
 
-The fresh checkpoint directly shows "Apa isi Lampiran 12?" scoring `{'refused': True}` — the exact case that was previously the one unresolved false positive is now confirmed corrected, not just theoretically fixed. **FIXED & VERIFIED.**
+Checkpoint terbaru secara langsung menunjukkan "Apa isi Lampiran 12?" mendapat skor `{'refused': True}`, kasus yang persis sama yang sebelumnya menjadi satu-satunya false positive yang belum terselesaikan kini terkonfirmasi telah diperbaiki, bukan hanya diperbaiki secara teoretis. **DIPERBAIKI & TERVERIFIKASI.**
 
-**Net assessment: the system did not get worse at 10x scale.** Precision improved (0.984 → 0.992); the apparent recall dip is fully explained by (a) far harder/deeper sub-headings across 10x the file count and (b) a meaningful share of "FN"s being correct refusals the ground truth shouldn't have expected answers for.
+**Penilaian bersih: sistem tidak memburuk pada skala 10x.** Precision membaik (0,984 → 0,992); penurunan recall yang tampak sepenuhnya dapat dijelaskan oleh (a) sub-heading yang jauh lebih sulit/dalam di 10x jumlah file dan (b) sebagian besar "FN" adalah penolakan yang benar yang seharusnya memang tidak diharapkan ground truth untuk dijawab.
 
 ---
 
-## 8. Cross-Document Discovery (scored separately, not part of the matrix)
+## 8. Cross-Document Discovery (dinilai terpisah, tidak termasuk dalam matriks)
 
-| Metric | v2 | v3 | v4 | What it means |
+| Metrik | v2 | v3 | v4 | Artinya |
 |---|---|---|---|---|
-| Topic discovery hit rate | 0.733 | 0.733 | 0.733 | For 73.3% of discovery questions, at least one returned document overlapped the expected set. |
-| Answered rate | — | — | **0.8** | Fraction of discovery questions where the system gave a real answer rather than refusing/clarifying. |
-| Avg source recall | 0.633 | 0.631 | 0.631 | Of the documents that *should* have been found for a topic, ~63% were found on average. |
-| Avg source precision | 0.298 | 0.452 | **0.482** | Continuing to improve as the ground-truth-broadening fix (Bug 1 above) pays off further with scale. |
+| Tingkat keberhasilan penemuan topik | 0,733 | 0,733 | 0,733 | Untuk 73,3% pertanyaan penemuan, setidaknya satu dokumen yang dikembalikan tumpang tindih dengan set yang diharapkan. |
+| Tingkat terjawab | - | - | **0,8** | Proporsi pertanyaan penemuan yang diberi sistem jawaban sungguhan, bukan menolak/meminta klarifikasi. |
+| Rata-rata source recall | 0,633 | 0,631 | 0,631 | Dari dokumen yang *seharusnya* ditemukan untuk suatu topik, rata-rata ~63% berhasil ditemukan. |
+| Rata-rata source precision | 0,298 | 0,452 | **0,482** | Terus membaik seiring perbaikan ground-truth yang diperluas (Bug 1 di atas) semakin membuahkan hasil pada skala yang lebih besar. |
 
-## 9. Enumeration (4/4 at v4; part of the 1k/catch-up totals in §10)
+## 9. Enumeration (4/4 pada v4; bagian dari total 1k/catch-up pada §10)
 
-| Metric | Score |
+| Metrik | Skor |
 |---|---|
-| Completeness (avg fraction of expected items listed) | 1.0 |
-| Exact match rate | 1.0 |
+| Kelengkapan (rata-rata proporsi item yang diharapkan tercantum) | 1,0 |
+| Tingkat kecocokan persis | 1,0 |
 
-## 10. Corpus-coverage catch-up run (346 questions, 2026-09-30)
+## 10. Proses catch-up cakupan korpus (346 pertanyaan, 2026-09-30)
 
-The 1,000-question run referenced 828 of 1,177 files. Rather than blindly generating more questions, the exact 349 uncovered files were analyzed directly: 49 had zero usable headings at all (a genuine structural ceiling for heading-based categories), the other 300 simply hadn't been sampled deep enough. Built 346 targeted questions: 297 reusing the existing Answerable/Procedural builders restricted to those 300 files, plus a new **Whole-Document** category (49 questions, one per headingless file).
+Uji 1.000 pertanyaan merujuk 828 dari 1.177 file. Alih-alih membuat lebih banyak pertanyaan secara membabi buta, 349 file yang belum tercakup dianalisis langsung: 49 file sama sekali tidak memiliki heading yang dapat digunakan (sebuah batas struktural sungguhan untuk kategori berbasis heading), 300 file lainnya sekadar belum tersampel cukup dalam. Dibangun 346 pertanyaan tertarget: 297 menggunakan kembali pembangun Answerable/Procedural yang sudah ada dibatasi pada 300 file tersebut, ditambah kategori baru **Whole-Document** (49 pertanyaan, satu per file tanpa heading).
 
 | | TP | FP | FN | TN | Precision | Recall | F1 | Accuracy |
 |---|---|---|---|---|---|---|---|---|
-| Catch-up (346 q, no should-refuse questions in this set) | 306 | 0 | 40 | 0 | 1.0 | 0.884 | 0.939 | 0.884 |
+| Catch-up (346 pertanyaan, tanpa pertanyaan should-refuse di set ini) | 306 | 0 | 40 | 0 | 1,0 | 0,884 | 0,939 | 0,884 |
 
-- **Whole-Document exact-document-hit-rate: 1.0** — every one of the 49 previously-unreachable headingless files was correctly identified as the source document.
-- The 40 FNs follow the same pattern already established in the main run: several are "correct refusal on a content-thin heading" rather than genuine misses.
-- **Combined coverage: 1,174 of 1,177 files (99.7%)** now demonstrably referenced across the two runs, up from 828 (70%) in the main run alone, and from 126 files (~11%) at v4.
-- **Recommended stopping point on coverage**: the 3 remaining files have no usable content signal for any current question category — further eval investment should target measurement depth, not raw file count.
-
----
-
-## 11. How long it took
-
-Real timing, computed directly from per-question durations logged during each run — not estimated.
-
-| Run | Questions | Compute time |
-|---|---|---|
-| Main 1,000-question run | 1,000 | **7h 15m 26s** (avg 26.1s/q) |
-| Corpus-coverage catch-up run | 346 | **1h 19m 22s** |
-| Ambiguity-fix verification re-run | 40 | **62.8s** |
-| **Total** | **1,386** | **~8h 35m** |
-
-**Main 1,000-question run, by category:**
-
-| Category | Count | Total time | Avg/question | Slowest question |
-|---|---|---|---|---|
-| Answerable | 450 | 267.9 min | 35.7s | 132.7s |
-| Procedural | 250 | 137.9 min | 33.1s | **449.2s** |
-| Cross-Document | 100 | 18.1 min | 10.9s | 25.2s |
-| Should-Refuse | 120 | 10.8 min | 5.4s | 18.5s |
-| Enumerate | 80 | 0.6 min | 0.4s | 10.8s |
-
-**Catch-up run (346 questions):**
-
-| Category | Count | Total time | Avg/question | Slowest question |
-|---|---|---|---|---|
-| Answerable | 262 | 60.5 min | 13.9s | 40.8s |
-| Procedural | 35 | 11.5 min | 19.7s | 50.2s |
-| Whole-Document | 49 | 7.3 min | 9.0s | 18.5s |
-
-**What drove the cost:**
-
-- **Answerable and Procedural together account for ~93% of total main-run time** — both are the largest categories *and* the only ones requiring a full retrieval + LLM generation cycle per question.
-- **Enumerate is effectively free (0.4s avg)** — answers directly from the pre-extracted heading list, no LLM call.
-- **Should-Refuse and Cross-Document are cheap** (5–11s avg) — refusal short-circuits quickly once the relevance gate fails; discovery reuses retrieval without a long generation step.
-- **The single slowest question (449.2s, ~7.5 min)** was a garbled procedural question that triggered the full-document-fallback path — a deliberate "try harder before refusing" tradeoff, not a bug.
+- **Tingkat ketepatan dokumen Whole-Document: 1,0**, setiap satu dari 49 file tanpa heading yang sebelumnya tidak terjangkau berhasil diidentifikasi dengan benar sebagai dokumen sumber.
+- 40 FN mengikuti pola yang sama seperti yang sudah ditemukan di proses utama: beberapa di antaranya adalah "penolakan yang benar pada heading dengan isi tipis", bukan kegagalan sungguhan.
+- **Cakupan gabungan: 1.174 dari 1.177 file (99,7%)** kini terbukti telah dirujuk di kedua proses, naik dari 828 (70%) pada proses utama saja, dan dari 126 file (~11%) pada v4.
+- **Titik henti cakupan yang direkomendasikan:** 3 file yang tersisa tidak memiliki sinyal konten yang dapat digunakan untuk kategori pertanyaan mana pun saat ini, investasi evaluasi selanjutnya sebaiknya diarahkan ke kedalaman pengukuran, bukan jumlah file mentah.
 
 ---
 
-## 12. Bugs found and fixed (system bugs, not scoring bugs)
+## 11. Berapa lama waktu yang dibutuhkan
 
-Grouped by area. "Before → After" is given wherever a fix has a measurable number — most ingestion/OCR bugs were correctness fixes with no single before/after figure.
+Waktu nyata, dihitung langsung dari durasi per pertanyaan yang dicatat selama setiap proses, bukan estimasi.
 
-### Ingestion & OCR pipeline
-
-| Bug | Root cause | Fix |
+| Proses | Jumlah pertanyaan | Waktu komputasi |
 |---|---|---|
-| Full ingestion could crash on certain PDFs | A PDF's CMap (character-encoding table) could declare byte-ranges large enough to blow up memory — a "range bomb," found and fixed in two passes (per-declaration cap, then an unbounded-operand-length gap). | Hard cap on CMap range size, enforced per-font total. |
-| OCR at higher DPI hung real ingestion | Raised DPI 200→400 for table/line accuracy; fine in isolated tests, hung indefinitely under full real-corpus load. | Reverted to DPI 200, added subprocess timeouts as a safety net. |
-| Digits silently dropped from scanned numeric fields | Tesseract's default Page Segmentation Mode sometimes misread OCR'd digits with no error. | Confidence-based PSM fallback: low-confidence first pass retries with a different PSM. |
-| Rotated scanned pages produced garbage OCR | Some pages photographed/scanned sideways, OCR ran without rotation correction. | Tesseract OSD-based rotation detection, gated on OSD's own confidence score. |
-| Pages with broken/custom fonts silently lost content | A page could have a text layer that *looked* present but was non-printable garbage; the pipeline treated "has a text layer" as "has real text," skipping OCR. | Printable-character-ratio check + pdfminer `(cid:N)` glyph-ID artifact detection triggers OCR fallback. |
-| VLM wasted time on non-diagram pages | Decorative signature/stamp graphics misclassified as "diagram-heavy." | Tightened the graphical-page heuristic. |
-| Ingestion non-deterministic on re-ingest | VLM diagram descriptions aren't fully deterministic even at `temperature=0` (likely GPU floating-point execution-order variance). | Cache VLM descriptions in sqlite by content hash. **Before → After:** 6/20 files drifted in chunk count before the fix; 0/10 drifted in a follow-up stress test after. |
-| Ingestion workers could exceed available RAM | Worker count scaled by CPU count only, not real per-worker memory footprint. | Capped worker count by available RAM, then re-measured and raised the budget once confirmed safe. |
+| Proses utama 1.000 pertanyaan | 1.000 | **7j 15m 26d** (rata-rata 26,1 detik/pertanyaan) |
+| Proses catch-up cakupan korpus | 346 | **1j 19m 22d** |
+| Pengujian ulang verifikasi perbaikan ambiguitas | 40 | **62,8 detik** |
+| **Total** | **1.386** | **~8j 35m** |
+
+**Proses utama 1.000 pertanyaan, per kategori:**
+
+| Kategori | Jumlah | Total waktu | Rata-rata/pertanyaan | Pertanyaan paling lambat |
+|---|---|---|---|---|
+| Answerable | 450 | 267,9 menit | 35,7 detik | 132,7 detik |
+| Procedural | 250 | 137,9 menit | 33,1 detik | **449,2 detik** |
+| Cross-Document | 100 | 18,1 menit | 10,9 detik | 25,2 detik |
+| Should-Refuse | 120 | 10,8 menit | 5,4 detik | 18,5 detik |
+| Enumerate | 80 | 0,6 menit | 0,4 detik | 10,8 detik |
+
+**Proses catch-up (346 pertanyaan):**
+
+| Kategori | Jumlah | Total waktu | Rata-rata/pertanyaan | Pertanyaan paling lambat |
+|---|---|---|---|---|
+| Answerable | 262 | 60,5 menit | 13,9 detik | 40,8 detik |
+| Procedural | 35 | 11,5 menit | 19,7 detik | 50,2 detik |
+| Whole-Document | 49 | 7,3 menit | 9,0 detik | 18,5 detik |
+
+**Apa yang mendorong biaya waktu:**
+
+- **Answerable dan Procedural bersama-sama menyumbang ~93% dari total waktu proses utama**, keduanya adalah kategori terbesar *sekaligus* satu-satunya yang membutuhkan siklus retrieval plus generasi LLM secara penuh per pertanyaan.
+- **Enumerate pada dasarnya gratis (rata-rata 0,4 detik)**, menjawab langsung dari daftar heading yang sudah diekstrak sebelumnya, tanpa pemanggilan LLM.
+- **Should-Refuse dan Cross-Document murah** (rata-rata 5-11 detik), penolakan berlangsung cepat begitu gerbang relevansi gagal; penemuan menggunakan kembali retrieval tanpa langkah generasi yang panjang.
+- **Pertanyaan paling lambat (449,2 detik, ~7,5 menit)** adalah pertanyaan prosedural yang kacau sehingga memicu jalur fallback dokumen penuh, sebuah kompromi "coba lebih keras sebelum menolak" yang memang disengaja, bukan bug.
+
+---
+
+## 12. Bug yang ditemukan dan diperbaiki (bug sistem, bukan bug penilaian)
+
+Dikelompokkan menurut area. "Sebelum → Sesudah" diberikan di mana pun suatu perbaikan memiliki angka yang dapat diukur; sebagian besar bug ingestion/OCR adalah perbaikan kebenaran tanpa satu angka sebelum/sesudah tunggal.
+
+### Pipeline ingestion & OCR
+
+| Bug | Akar masalah | Perbaikan |
+|---|---|---|
+| Ingestion penuh dapat crash pada PDF tertentu | CMap (tabel pengkodean karakter) suatu PDF dapat mendeklarasikan rentang byte yang cukup besar untuk membuat memori meledak, sebuah "range bomb", ditemukan dan diperbaiki dalam dua tahap (batas per-deklarasi, lalu celah panjang operand tak terbatas). | Batas keras pada ukuran rentang CMap, diberlakukan per total font. |
+| OCR pada DPI lebih tinggi membuat ingestion nyata hang | DPI dinaikkan dari 200 ke 400 untuk akurasi tabel/garis; baik-baik saja pada pengujian terisolasi, tetapi hang tanpa henti saat beban korpus nyata penuh. | Dikembalikan ke DPI 200, ditambahkan timeout subprocess sebagai jaring pengaman. |
+| Digit diam-diam hilang dari bidang numerik hasil pindai | Page Segmentation Mode bawaan Tesseract terkadang salah membaca digit hasil OCR tanpa menghasilkan error. | Fallback PSM berbasis confidence: hasil confidence rendah pada percobaan pertama dicoba ulang dengan PSM berbeda. |
+| Halaman hasil pindai yang miring menghasilkan OCR yang kacau | Beberapa halaman difoto/dipindai secara miring, OCR berjalan tanpa koreksi rotasi. | Deteksi rotasi berbasis Tesseract OSD, digerbangkan oleh skor confidence OSD itu sendiri. |
+| Halaman dengan font rusak/kustom diam-diam kehilangan konten | Suatu halaman bisa memiliki layer teks yang *tampak* ada tetapi sebenarnya sampah yang tidak dapat dicetak; pipeline memperlakukan "memiliki layer teks" sebagai "memiliki teks sungguhan", sehingga melewatkan OCR. | Pemeriksaan rasio karakter yang dapat dicetak + deteksi artefak glyph-ID `(cid:N)` pdfminer memicu fallback OCR. |
+| VLM membuang waktu pada halaman non-diagram | Grafik tanda tangan/stempel dekoratif salah diklasifikasikan sebagai "kaya diagram". | Heuristik halaman bergambar diperketat. |
+| Ingestion tidak deterministik saat re-ingest | Deskripsi diagram VLM tidak sepenuhnya deterministik bahkan pada `temperature=0` (kemungkinan karena variasi urutan eksekusi floating-point GPU). | Deskripsi VLM di-cache di sqlite berdasarkan hash konten. **Sebelum → Sesudah:** 6/20 file berubah jumlah chunk-nya sebelum perbaikan; 0/10 berubah pada uji stres lanjutan setelah perbaikan. |
+| Worker ingestion bisa melebihi RAM yang tersedia | Jumlah worker diskalakan hanya berdasarkan jumlah CPU, bukan jejak memori nyata per worker. | Jumlah worker dibatasi berdasarkan RAM yang tersedia, lalu diukur ulang dan anggaran dinaikkan setelah dikonfirmasi aman. |
 
 ### Retrieval
 
-| Bug | Root cause | Fix |
+| Bug | Akar masalah | Perbaikan |
 |---|---|---|
-| Wrong document's content retrieved when questions shared a code/number | A question mentioning one document's identifier could retrieve chunks from a *different* document that referenced that code in passing. | Boost prioritizes a document's own declared code over incidental mentions. |
-| Crash on small, source-filtered searches | Filtering to one document's chunks could leave fewer chunks than the configured rerank candidate count, crashing the HNSW index. | Retry that shrinks the candidate count on that specific failure, with a narrowed exception guard (only the known HNSW error string, not any `RuntimeError`). |
-| Generic headings hijacked retrieval | A "quote a heading to jump to it" boost matched heading *words* anywhere in a question, not an actual quoted span — 292 bare, common 2-word headings (e.g. "DAFTAR ISI") could hijack unrelated questions. | Required an actual quoted span, matched against the heading's own words. |
-| Boost mechanisms could exceed the retrieval budget | Three separate boost mechanisms each capped themselves independently, so combined they could still exceed the configured limit. | One shared helper caps both the boost list and the final combined result. |
-| Repeated running headers crowded out real content | Documents with repeated page headers/footers could fill top-k slots with duplicate boilerplate. | Deduplicate chunks by (source, text) before truncating to top-k. |
-| Category-word matching broke on lettered sub-items | Substring matching let lettered markers like "B." outrank real category words like "bab." | Switched to word-boundary regex with a 3-letter minimum. |
+| Konten dokumen yang salah terambil saat pertanyaan berbagi kode/nomor | Pertanyaan yang menyebut identifier satu dokumen bisa mengambil chunk dari dokumen *lain* yang kebetulan menyebut kode itu secara sekilas. | Boost mengutamakan kode deklarasi dokumen itu sendiri dibandingkan penyebutan insidental. |
+| Crash pada pencarian kecil yang difilter sumber | Memfilter ke chunk satu dokumen bisa menyisakan chunk lebih sedikit daripada jumlah kandidat rerank yang dikonfigurasi, sehingga membuat indeks HNSW crash. | Percobaan ulang yang mengecilkan jumlah kandidat pada kegagalan spesifik itu, dengan penjagaan exception yang dipersempit (hanya string error HNSW yang sudah dikenal, bukan `RuntimeError` apa pun). |
+| Heading generik membajak retrieval | Boost "kutip heading untuk melompat ke sana" mencocokkan kata-kata heading di mana pun dalam pertanyaan, bukan rentang kutipan sungguhan, 292 heading dua kata yang umum dan telanjang (misalnya "DAFTAR ISI") bisa membajak pertanyaan yang tidak terkait. | Diwajibkan rentang kutipan sungguhan, dicocokkan terhadap kata-kata milik heading itu sendiri. |
+| Mekanisme boost bisa melebihi anggaran retrieval | Tiga mekanisme boost terpisah masing-masing membatasi dirinya sendiri secara independen, sehingga gabungannya tetap bisa melebihi batas yang dikonfigurasi. | Satu helper bersama membatasi baik daftar boost maupun hasil gabungan akhir. |
+| Header halaman berulang menyesaki konten sungguhan | Dokumen dengan header/footer halaman berulang bisa memenuhi slot top-k dengan boilerplate duplikat. | Deduplikasi chunk berdasarkan (sumber, teks) sebelum dipotong ke top-k. |
+| Pencocokan kata kategori rusak pada sub-item berhuruf | Pencocokan substring membuat penanda berhuruf seperti "B." mengalahkan kata kategori sungguhan seperti "bab." | Diganti menjadi regex batas kata dengan minimum 3 huruf. |
 
-### Generation / answer quality
+### Generasi / kualitas jawaban
 
-| Bug | Root cause | Fix |
+| Bug | Akar masalah | Perbaikan |
 |---|---|---|
-| Vocabulary-mismatch questions unnecessarily refused | Colloquial phrasing (e.g. "cuti") didn't match the corpus's formal terms (e.g. "Istirahat Tahunan"). | **Attempted and reverted:** an LLM-based query-rewrite fallback fixed some cases but introduced new false positives on off-topic questions. Documented as a known, deliberately unfixed gap. |
-| Refusal detector false-positived on real content | Keyword-based detection (`"tidak ditemukan"`) flagged genuinely correct answers using the phrase legitimately (e.g. a medical category meaning "no abnormality found"). | Replaced the final decision with semantic similarity against canonical refusal templates (keyword match kept as a cheap pre-filter). |
-| Duplicate work in multi-answer path | `looks_like_refusal()` called twice per result — costly once the semantic-similarity change made each call do embedding work. | Compute once, reuse the result. |
-| Relevance gate too permissive on off-topic queries | A single raw similarity threshold let some off-topic questions through. | Dual-signal gate: raw cosine **or** cross-encoder rerank must clear a threshold; fails closed if rerank score is missing. |
+| Pertanyaan dengan ketidakcocokan kosakata ditolak secara tidak perlu | Frasa percakapan (misalnya "cuti") tidak cocok dengan istilah formal korpus (misalnya "Istirahat Tahunan"). | **Dicoba lalu dibatalkan:** fallback penulisan ulang query berbasis LLM memperbaiki sebagian kasus tetapi memunculkan false positive baru pada pertanyaan di luar topik. Didokumentasikan sebagai celah yang diketahui dan sengaja belum diperbaiki. |
+| Pendeteksi penolakan salah positif pada konten sungguhan | Deteksi berbasis kata kunci (`"tidak ditemukan"`) menandai jawaban yang sebenarnya benar yang memakai frasa tersebut secara sah (misalnya kategori medis yang berarti "tidak ditemukan kelainan"). | Keputusan akhir diganti dengan kemiripan semantik terhadap template penolakan kanonis (pencocokan kata kunci dipertahankan sebagai pre-filter murah). |
+| Pekerjaan duplikat pada jalur multi-jawaban | `looks_like_refusal()` dipanggil dua kali per hasil, menjadi mahal begitu perubahan kemiripan semantik membuat setiap pemanggilan melakukan pekerjaan embedding. | Dihitung sekali, hasilnya digunakan kembali. |
+| Gerbang relevansi terlalu longgar pada query di luar topik | Satu ambang batas kemiripan mentah tunggal meloloskan beberapa pertanyaan di luar topik. | Gerbang dua sinyal: cosine mentah **atau** skor rerank cross-encoder harus melewati ambang batas; gagal tertutup jika skor rerank tidak ada. |
 
-### Evaluation methodology
+### Metodologi evaluasi
 
-See §4 above for the three scoring-methodology bugs. Two more, infrastructure-adjacent:
+Lihat §4 di atas untuk tiga bug metodologi penilaian. Dua lagi, terkait infrastruktur:
 
-| Bug | Root cause | Fix |
+| Bug | Akar masalah | Perbaikan |
 |---|---|---|
-| A finalized multi-source answer's "also matches N other documents" note never reached the persisted log row | The competing-documents path logs the inner recursive call's text first, then appends the note afterward, reusing the earlier log row's id — so the stored `answer_log.answer` text silently disagreed with what the user saw. | `database.update_answer_text()` patches the row in place once the final text is known. |
-| `build_eval_questions.py`'s no-filename regex silently matched 0/40 questions in testing | Used `[^.?]+` for the filename token being stripped — real filenames are full of periods (embedded dates like `01.10.2020`), so the regex never matched. | Switched to `\S+`. Caught by a smoke test before the full run, not after. |
+| Catatan "juga cocok dengan N dokumen lain" pada jawaban multi-sumber yang sudah final tidak pernah sampai ke baris log yang disimpan | Jalur dokumen yang bersaing mencatat teks pemanggilan rekursif dalam terlebih dahulu, baru menambahkan catatan setelahnya, menggunakan kembali id baris log sebelumnya, sehingga teks `answer_log.answer` yang tersimpan diam-diam berbeda dengan apa yang dilihat pengguna. | `database.update_answer_text()` menambal baris tersebut langsung di tempat begitu teks final diketahui. |
+| Regex tanpa-nama-file di `build_eval_questions.py` diam-diam tidak cocok dengan 0/40 pertanyaan saat pengujian | Menggunakan `[^.?]+` untuk token nama file yang ingin dihapus, padahal nama file sungguhan penuh dengan titik (tanggal tertanam seperti `01.10.2020`), sehingga regex tidak pernah cocok. | Diganti menjadi `\S+`. Tertangkap oleh smoke test sebelum proses penuh dijalankan, bukan sesudahnya. |
 
-### Infrastructure / UI
+### Infrastruktur / UI
 
-| Bug | Root cause | Fix | Before → After |
+| Bug | Akar masalah | Perbaikan | Sebelum → Sesudah |
 |---|---|---|---|
-| Streamlit sidebar showed "0 dokumen" | `/documents` queried ChromaDB once **per document** (1,177 separate queries), serially, outside the app's single dedicated Chroma-access thread. | Batched into one query for all documents' labels, routed through the proper thread. | 120+ sec (timeout/hang) → 12.4 sec |
-| `/documents` still occasionally timed out | A second bottleneck: the endpoint opened every one of the 1,177 PDFs with `pdfplumber` on *every request* just to count pages. | Cache `page_count`/`size_kb` in sqlite at ingest time; self-healing backfill for pre-existing documents. | 52 sec (first backfill) → 1.6 sec (cached) |
-| Streamlit chat history showed a redundant "Q:/A:" prefix on reload | The saved string baked in formatting the live UI never actually used on first render. | Store exactly what the live UI renders. | — |
+| Sidebar Streamlit menampilkan "0 dokumen" | `/documents` melakukan query ChromaDB satu kali **per dokumen** (1.177 query terpisah), secara serial, di luar satu thread akses Chroma khusus milik aplikasi. | Digabungkan menjadi satu query untuk label semua dokumen, dialihkan melalui thread yang sesuai. | 120+ detik (timeout/hang) → 12,4 detik |
+| `/documents` masih sesekali timeout | Hambatan kedua: endpoint membuka setiap satu dari 1.177 PDF dengan `pdfplumber` pada *setiap request* hanya untuk menghitung halaman. | `page_count`/`size_kb` di-cache di sqlite saat waktu ingest; backfill otomatis untuk dokumen yang sudah ada sebelumnya. | 52 detik (backfill pertama) → 1,6 detik (sudah di-cache) |
+| Riwayat chat Streamlit menampilkan prefiks "Q:/A:" yang berulang saat dimuat ulang | String yang disimpan memanggang format yang sebenarnya tidak pernah dipakai oleh UI langsung saat render pertama. | Menyimpan persis apa yang dirender oleh UI langsung. | - |
 
 ---
 
-## 13. Strengths
+## 13. Kekuatan
 
-- **Precision held at 0.992 at full 1,177-document, 1,000-question scale** — the system essentially never fabricates an answer, and this got slightly *better* as the corpus and question count grew 10x from v4.
-- **Real recall is meaningfully higher than the 0.874 headline figure** — 64% of v5's false negatives had the exact right document AND page retrieved but were correctly refused (honest anti-hallucination behavior, not a defect).
-- **High document-level retrieval accuracy holds up at full-corpus scale** (78–87% across answerable/procedural, v5) even with half the questions dropping the filename hint. The catch-up run's Whole-Document category scored **100%** document accuracy.
-- **Corpus coverage validated end-to-end**: 1,174 of 1,177 files (99.7%) demonstrably referenced, up from 126 (~11%) at v4.
-- **Ambiguity detection now structurally sound at full-corpus scale** — rewritten from a score-gap heuristic to the same structural heading-count logic the eval's own ground truth is built from, so detection and ground truth agree by construction.
-- **Ingestion pipeline hardened against real corpus pathologies** — broken/custom fonts, rotated scans, malformed CMap tables, decorative-graphic false positives, VLM non-determinism — found through direct testing against the actual 1,177-document corpus.
-- **Correct concurrency discipline for ChromaDB** once the two `/documents`-endpoint bugs were found and fixed.
+- **Precision bertahan di 0,992 pada skala penuh 1.177 dokumen, 1.000 pertanyaan**, sistem pada dasarnya hampir tidak pernah mengarang jawaban, dan ini justru sedikit *membaik* seiring korpus dan jumlah pertanyaan tumbuh 10x dari v4.
+- **Recall sebenarnya kemungkinan jauh lebih tinggi daripada angka utama 0,874**, 64% false negative v5 memiliki dokumen DAN halaman yang persis benar berhasil diambil tetapi dengan benar ditolak (perilaku anti-halusinasi yang jujur, bukan cacat).
+- **Akurasi retrieval level dokumen yang tinggi tetap bertahan pada skala korpus penuh** (78-87% di seluruh answerable/procedural, v5) bahkan dengan setengah pertanyaan menghilangkan petunjuk nama file. Kategori Whole-Document pada proses catch-up mencetak **100%** akurasi dokumen.
+- **Cakupan korpus tervalidasi secara end-to-end**: 1.174 dari 1.177 file (99,7%) terbukti telah dirujuk, naik dari 126 (~11%) pada v4.
+- **Deteksi ambiguitas kini solid secara struktural pada skala korpus penuh**, ditulis ulang dari heuristik celah skor menjadi logika struktural jumlah heading yang sama dengan yang dipakai untuk membangun ground truth evaluasi itu sendiri, sehingga deteksi dan ground truth selaras secara konstruksi.
+- **Pipeline ingestion diperkeras terhadap patologi korpus nyata**, font rusak/kustom, hasil pindai miring, tabel CMap yang cacat, salah deteksi grafik dekoratif, non-determinisme VLM, semuanya ditemukan melalui pengujian langsung terhadap korpus 1.177 dokumen yang sesungguhnya.
+- **Disiplin konkurensi yang benar untuk ChromaDB** setelah kedua bug endpoint `/documents` ditemukan dan diperbaiki.
 
-## 14. Weaknesses
+## 14. Kelemahan
 
-- **Recall is 87.4% at full scale, not higher, partly by deliberate design** — the system favors precision over recall, so real users will occasionally get an incorrect "not found." A meaningful share of this is actually correct refusal on content-thin headings, but the remaining genuine retrieval misses (27% of v5's FNs) are a real user-facing limitation.
-- **Page-level retrieval accuracy (70–79%, v5) lags document-level accuracy** — even when the system finds the right document, it doesn't always land on the exact right page. This is the single largest known weak spot.
-- **Cross-document discovery precision remains a real limitation** (90% hit rate, 57% average precision on returned documents) — improving release over release (30%→45%→48%→57%), but the remaining gap is genuine retrieval imprecision.
-- **Two rare heading-extraction data-quality issues** surfaced during investigation (an OCR word-boundary transposition, now filtered, and one differently-shaped garbled heading the current filter doesn't catch).
-- **Borderline non-determinism near the refusal-detection boundary** — 4 of v5's 5 false positives didn't reproduce on a fresh re-run, suggesting a narrow band where LLM phrasing variance can flip the classification either way.
-- **Content-correctness scoring is a blunt proxy** (word overlap, not semantic correctness) — needs periodic manual spot-checking, not standalone trust.
-- **Vocabulary mismatch (colloquial vs. formal terms) remains unfixed** — a deliberate, documented gap after two worse-regression fix attempts.
-- **VLM output is inherently non-deterministic** even at `temperature=0`, mitigated with caching for the common case (unchanged file re-ingestion) but not for genuinely new diagram-heavy pages.
-- **Ingestion time is not a fixed number** — ranges roughly 13–100+ seconds per document depending on OCR/VLM load.
+- **Recall sebesar 87,4% pada skala penuh, tidak lebih tinggi, sebagian karena desain yang disengaja.** Sistem mengutamakan precision di atas recall, sehingga pengguna nyata sesekali akan mendapat "tidak ditemukan" yang sebenarnya salah. Sebagian besar dari ini sebenarnya adalah penolakan yang benar pada heading dengan isi tipis, tetapi sisa kegagalan retrieval sungguhan (27% dari FN v5) tetap merupakan keterbatasan nyata yang dialami pengguna.
+- **Akurasi retrieval level halaman (70-79%, v5) tertinggal di belakang akurasi level dokumen.** Bahkan ketika sistem menemukan dokumen yang tepat, sistem tidak selalu mendarat di halaman yang persis benar. Ini adalah titik lemah tunggal terbesar yang diketahui.
+- **Precision penemuan lintas dokumen tetap menjadi keterbatasan nyata** (tingkat keberhasilan 90%, rata-rata precision 57% pada dokumen yang dikembalikan), terus membaik dari rilis ke rilis (30% → 45% → 48% → 57%), tetapi celah yang tersisa adalah ketidaktepatan retrieval yang sungguhan.
+- **Dua masalah kualitas data ekstraksi heading yang langka** muncul selama investigasi (sebuah transposisi batas kata hasil OCR, kini sudah difilter, dan satu heading kacau berbentuk berbeda yang belum tertangkap filter saat ini).
+- **Non-determinisme tipis di dekat batas deteksi penolakan**, 4 dari 5 false positive v5 tidak terulang pada pengujian ulang segar, menunjukkan ada pita sempit tempat variasi frasa LLM dapat membalikkan klasifikasi ke salah satu arah.
+- **Penilaian kebenaran konten adalah proksi yang kasar** (tumpang tindih kata, bukan kebenaran semantik), perlu pemeriksaan manual acak secara berkala, tidak bisa dipercaya begitu saja.
+- **Ketidakcocokan kosakata (percakapan vs formal) tetap belum diperbaiki**, celah yang disengaja dan terdokumentasi setelah dua percobaan perbaikan yang justru memperburuk keadaan.
+- **Output VLM secara inheren tidak deterministik** bahkan pada `temperature=0`, dimitigasi dengan caching untuk kasus umum (re-ingestion file yang tidak berubah) tetapi tidak untuk halaman kaya diagram yang benar-benar baru.
+- **Waktu ingestion bukan angka tetap**, berkisar kasar antara 13-100+ detik per dokumen tergantung beban OCR/VLM.
 
 ---
 
-## 15. Conclusion
+## 15. Kesimpulan
 
-The system did not get worse at 10x scale — precision *improved* (0.984 → 0.992), and the apparent recall dip is fully explained by (a) far harder sub-headings across 10x the file count and (b) a meaningful share of counted "misses" being correct refusals the ground truth shouldn't have expected answers for. The one genuine defect this round of testing surfaced (generic-identifier ambiguity not scaling to corpora with many equally-valid candidates) was root-caused, fixed, and confirmed with a targeted before/after re-run the same day it was found.
+Sistem tidak memburuk pada skala 10x, precision justru *membaik* (0,984 → 0,992), dan penurunan recall yang tampak sepenuhnya dapat dijelaskan oleh (a) sub-heading yang jauh lebih sulit di 10x jumlah file dan (b) sebagian besar "miss" yang terhitung sebenarnya adalah penolakan yang benar yang seharusnya memang tidak diharapkan ground truth untuk dijawab. Satu cacat nyata yang ditemukan pada putaran pengujian ini (ambiguitas identifier generik yang tidak dapat diskalakan ke korpus dengan banyak kandidat yang sama validnya) telah ditelusuri akar masalahnya, diperbaiki, dan dikonfirmasi dengan pengujian ulang sebelum/sesudah yang tertarget pada hari yang sama ketika ditemukan.
 
-**The larger point:** three of the four issues found in the full-corpus stress test were bugs in the *measurement*, not the system. A confusion matrix that isn't itself stress-tested can report a confident, wrong number indefinitely — treating the eval harness as code that needs the same scrutiny as production code is what surfaced all of them.
+**Poin yang lebih besar:** tiga dari empat masalah yang ditemukan dalam uji stres korpus penuh ini adalah bug pada *pengukurannya*, bukan pada sistemnya. Sebuah confusion matrix yang tidak diuji stres sendiri dapat melaporkan angka yang salah namun meyakinkan tanpa batas waktu, memperlakukan harness evaluasi sebagai kode yang membutuhkan kehati-hatian yang sama seperti kode produksi adalah hal yang berhasil menyingkap semuanya.
 
-*All numbers in this report are drawn directly from real evaluation runs against the production document corpus; nothing here is estimated or simulated.*
+*Semua angka dalam laporan ini diambil langsung dari proses evaluasi nyata terhadap korpus dokumen produksi; tidak ada satu pun di sini yang merupakan estimasi atau simulasi.*

@@ -1,170 +1,191 @@
-# STK Online RAG — backend
+# STK Online RAG - backend
 
-The RAG engine: FastAPI backend, ingestion pipeline (PDF/OCR/VLM/chunking),
-retrieval (embeddings + rerank + boosts), generation, and all persistence
-(ChromaDB + sqlite). Frontend-agnostic — nothing in here imports or knows
-about Streamlit; see `../frontend-streamlit/` for the current UI and
-`../docs/ARCHITECTURE.md` for the full system design.
+Mesin RAG: backend FastAPI, pipeline ingestion (PDF/OCR/VLM/chunking),
+retrieval (embeddings + rerank + boosts), generation, dan seluruh persistensi
+(ChromaDB + sqlite). Tidak bergantung pada frontend tertentu: tidak ada bagian
+di sini yang mengimpor atau mengetahui tentang Streamlit; lihat `../frontend-streamlit/`
+untuk UI yang digunakan saat ini dan `../docs/ARCHITECTURE.md` untuk desain
+sistem secara lengkap.
 
-This file originally described a temporary 8GB-RAM/MX330-GPU laptop build;
-the project has since migrated to current hardware (see `MIGRATION.md`)
-and grown well beyond that initial scope. Current accurate model/hardware
-config lives in `../docs/ARCHITECTURE.md` §6 — treat that as the source of
-truth if anything below conflicts with it.
+File ini awalnya mendeskripsikan build laptop sementara dengan RAM 8GB dan
+GPU MX330; proyek ini sejak itu telah bermigrasi ke perangkat keras saat ini
+(lihat `MIGRATION.md`) dan berkembang jauh melampaui cakupan awal tersebut.
+Konfigurasi model/hardware yang akurat saat ini ada di `../docs/ARCHITECTURE.md`
+bagian 6; anggap itu sebagai sumber kebenaran jika ada yang bertentangan
+dengan isi di bawah ini.
 
-## Model choice
+## Pemilihan model
 
-Current config (see `app/config.py`): `qwen3.5:9b` (LLM) and `qwen2.5vl:7b`
-(VLM, diagram description) via local Ollama, on an i7-240H / RTX 5050 8GB
-VRAM machine. Thinking mode is disabled on the LLM call (`"think": false`)
-for latency — see `../docs/ARCHITECTURE.md` and `../docs/EVALUATION_REPORT.md`
-for why and the measured impact.
+Konfigurasi saat ini (lihat `app/config.py`): `qwen3.5:9b` (LLM) dan
+`qwen2.5vl:7b` (VLM, deskripsi diagram) melalui Ollama lokal, pada mesin
+i7-240H / RTX 5050 8GB VRAM. Mode thinking dinonaktifkan pada pemanggilan LLM
+(`"think": false`) demi latensi; lihat `../docs/ARCHITECTURE.md` dan
+`../docs/EVALUATION_REPORT.md` untuk alasan dan dampak yang terukur.
 
-An earlier pass of this project ran `qwen2.5:3b-instruct-q4_K_M` on a
-temporary 8GB-RAM/MX330-2GB-VRAM laptop while the main machine was in for
-repair — that constraint no longer applies, kept here only as history.
+Pada tahap awal proyek ini, sempat dijalankan `qwen2.5:3b-instruct-q4_K_M`
+pada laptop sementara dengan RAM 8GB dan VRAM 2GB MX330 saat mesin utama
+sedang diperbaiki; batasan tersebut sudah tidak berlaku lagi, disimpan di
+sini hanya sebagai catatan sejarah.
 
-## Setup
+## Instalasi
 
 ```bash
 py -m venv .venv
 .venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-Torch pulls a large default wheel with bundled CUDA on Windows; on a slow
-connection, install the CPU-only wheel first (`pip install torch
---index-url https://download.pytorch.org/whl/cpu`), then run the full
-`pip install -r requirements.txt` — it will see torch already satisfied.
+Torch menarik wheel default berukuran besar dengan CUDA terpasang di
+Windows; pada koneksi lambat, instal dahulu wheel khusus CPU (`pip install
+torch --index-url https://download.pytorch.org/whl/cpu`), lalu jalankan
+`pip install -r requirements.txt` secara utuh; proses tersebut akan
+mendeteksi torch sudah terpenuhi.
 
-External binaries needed beyond pip packages:
+Binari eksternal yang dibutuhkan selain paket pip:
 
-- **Ollama** (`winget install Ollama.Ollama`), then
-  `ollama pull qwen3.5:9b` and `ollama pull qwen2.5vl:7b`.
-- **Poppler** (`winget install oschwartz10612.Poppler`) — required by
-  `pdf2image` for PDF-to-image rendering, used both by OCR ingestion and
-  the `/documents/{filename}/preview` thumbnail endpoint.
-- **Tesseract OCR + Indonesian language pack** (`winget install
-  UB-Mannheim.TesseractOCR`), then download `ind.traineddata` from
-  `tesseract-ocr/tessdata_fast` into a tessdata directory and point
-  `TESSDATA_PREFIX` at it (Program Files may need admin rights to write
-  directly into its own tessdata folder — a user-writable copy works fine).
+- **Ollama** (`winget install Ollama.Ollama`), kemudian jalankan
+  `ollama pull qwen3.5:9b` dan `ollama pull qwen2.5vl:7b`.
+- **Poppler** (`winget install oschwartz10612.Poppler`): dibutuhkan oleh
+  `pdf2image` untuk merender PDF menjadi gambar, digunakan baik oleh
+  ingestion OCR maupun endpoint `/documents/{filename}/preview` untuk
+  thumbnail.
+- **Tesseract OCR + paket bahasa Indonesia** (`winget install
+  UB-Mannheim.TesseractOCR`), lalu unduh `ind.traineddata` dari
+  `tesseract-ocr/tessdata_fast` ke dalam direktori tessdata dan arahkan
+  `TESSDATA_PREFIX` ke sana (Program Files mungkin memerlukan hak admin
+  untuk menulis langsung ke folder tessdata-nya sendiri; salinan yang
+  dapat ditulis oleh user biasa juga berfungsi dengan baik).
 
-Generate the small synthetic test corpus (10 contracts + 8 SOPs, per
-Section 10 of the rebuild spec — file count kept the same across later
-passes, only per-document length and scanned-page ratio grew):
+Hasilkan korpus uji sintetis berukuran kecil (10 kontrak + 8 SOP, sesuai
+Bagian 10 dari spesifikasi rebuild; jumlah file tetap sama pada tahap-tahap
+berikutnya, hanya panjang per dokumen dan rasio halaman hasil scan yang
+bertambah):
 
 ```bash
 .venv\Scripts\python.exe -m app.corpus_generator.generate
 ```
 
-Run the API from inside `backend/` (this also starts the APScheduler sync
-job and ingests on first `/sync` call):
+Jalankan API dari dalam folder `backend/` (langkah ini juga memulai job
+sinkronisasi APScheduler dan melakukan ingestion pada panggilan `/sync`
+pertama):
 
 ```bash
 .venv\Scripts\uvicorn.exe app.api:app --host 0.0.0.0 --port 8000
 ```
 
-Trigger the first ingestion:
+Picu ingestion pertama:
 
 ```bash
 curl -X POST http://localhost:8000/sync
 ```
 
-Run the Streamlit frontend — **from inside `../frontend-streamlit/`**, not
-here (the frontend was split into its own sibling folder, but still runs in
-this same `.venv`/environment; it auto-launches this backend if it isn't
-already running):
+Jalankan frontend Streamlit, **dari dalam `../frontend-streamlit/`**, bukan
+dari sini (frontend telah dipisahkan ke folder sibling tersendiri, namun
+tetap berjalan pada `.venv`/environment yang sama; frontend ini akan
+otomatis menjalankan backend ini jika belum berjalan):
 
 ```bash
 cd ..\frontend-streamlit
 ..\backend\.venv\Scripts\streamlit.exe run streamlit_app.py
 ```
 
-Run the grounded evaluation (from inside `backend/`):
+Jalankan evaluasi grounded (dari dalam `backend/`):
 
 ```bash
 .venv\Scripts\python.exe -m app.evaluate_grounded
 ```
 
-## What's in the system
+## Isi sistem
 
-- [app/retrieval.py](app/retrieval.py) — `source_filter`-aware `retrieve()`;
-  a wider embedding candidate set reranked by a cross-encoder
-  (`cross-encoder/mmarco-mMiniLMv2-L12-H384-v1`) before the top-k is passed
-  on; an exact-identifier boost that overrides both when the question names
-  a specific clause/section number (dynamically built from real indexed
-  filenames and retrieved chunk text, not a hardcoded vocabulary); ordered
-  `named_target_sources()` with connector- and contract-type-tolerant
-  shorthand matching ("kontrak 106", "kontrak nomor 106", "kontrak
-  konsultasi 104" all resolve); ambiguity detection scoped to bare generic
-  identifiers; scoped (never corpus-wide) heading lookups; broad-category
-  deterministic listing.
-- [app/ingestion.py](app/ingestion.py) — heading detection with the 5-line
-  merge cap and the bold-sentence exclusion; OCR fallback for scanned pages
-  with grayscale + Otsu binarization + deskew preprocessing and per-page
-  confidence capture; structure-aware chunking that splits on detected
-  headings first, falling back to clause/step-marker splitting and then a
-  sliding window for content with no clean structure.
-- [app/generation.py](app/generation.py) — conflicting-value attribution in
-  the prompt; identifier grounding with a dynamic per-call vocabulary
-  (keyed on the identifier's number/code, since a contract's ayat marker
-  heading is stored bare with no leading word) and a value-vs-identifier
-  filter (a number followed by a unit word like "juta"/"persen" is a value,
-  not a section reference); `ClarificationNeeded` response shape;
-  multi-question splitting that catches a conjunction-joined compound
-  question even with only one trailing "?", and never silently drops a
-  sub-question; bilingual (ID + EN) refusal/hedging detection; OCR-
-  confidence and fabrication disclaimers surfaced directly in the answer
-  text, not just logged.
-- [app/sync_documents.py](app/sync_documents.py) — one reconciliation
-  function shared by the APScheduler job (runs on `SYNC_INTERVAL_MINUTES`),
-  the `/sync` endpoint, and the Streamlit sidebar button.
-- [app/database.py](app/database.py) — paginated reads, short-TTL cache for
-  the indexed-filenames listing, chat/session storage, per-message token
-  counts, and the answer-flagging log (`human_flag`/`flag_category`/
-  `corrected_answer`, exportable via `/export_flags`).
-- [app/api.py](app/api.py) — `/ask`, `/sync`, `/sources`; `/documents`,
-  `/documents/{filename}/preview` (thumbnail + text snippet), and
-  `/documents/{filename}/download` (path-validated against the indexed
-  sources list, not a raw filesystem lookup); `/sessions` (list/create),
-  `/sessions/{id}/history`; `/flag/{log_id}`, `/export_flags`.
-- [`../frontend-streamlit/streamlit_app.py`](../frontend-streamlit/streamlit_app.py)
-  — dark-themed (`.streamlit/config.toml` is the single source of truth for
-  color; kept custom CSS to spacing/borders only, all colors chosen against
-  the theme's own palette) UI with a plain vertical sidebar document list
-  (no type grouping — a compact scrollable list works better at 1,177+
-  documents than grouped cards), a closable/reopenable preview panel, a
-  real switchable session list (auto-titled from each session's first
-  question, most-recent-first, with a per-session token-usage total), a
-  "New chat" button, a human-flagging control under each answer (wired to
-  `/flag/{log_id}`), and a fixed disclaimer under every AI answer.
+- [app/retrieval.py](app/retrieval.py): `retrieve()` yang mendukung
+  `source_filter`; kandidat embedding yang lebih luas kemudian di-rerank
+  oleh cross-encoder (`cross-encoder/mmarco-mMiniLMv2-L12-H384-v1`) sebelum
+  top-k diteruskan; boost identifier eksak yang mengesampingkan keduanya
+  saat pertanyaan menyebut nomor klausul/bagian tertentu (dibangun secara
+  dinamis dari nama file terindeks dan teks chunk yang diambil, bukan
+  kosakata yang di-hardcode); `named_target_sources()` yang terurut dengan
+  pencocokan singkatan yang toleran terhadap konektor dan jenis kontrak
+  ("kontrak 106", "kontrak nomor 106", "kontrak konsultasi 104" semuanya
+  dapat diselesaikan); deteksi ambiguitas yang dibatasi pada identifier
+  generik polos; pencarian heading yang dibatasi ruang lingkup (tidak
+  pernah mencakup seluruh korpus); pencantuman kategori luas yang
+  deterministik.
+- [app/ingestion.py](app/ingestion.py): deteksi heading dengan batas
+  penggabungan 5 baris dan pengecualian kalimat tebal; fallback OCR untuk
+  halaman hasil scan dengan praproses grayscale, binarisasi Otsu, dan
+  deskew, beserta pencatatan tingkat keyakinan per halaman; chunking yang
+  sadar struktur, memecah berdasarkan heading yang terdeteksi terlebih
+  dahulu, lalu beralih ke pemecahan berbasis penanda klausul/langkah, dan
+  akhirnya sliding window untuk konten tanpa struktur yang jelas.
+- [app/generation.py](app/generation.py): atribusi nilai yang saling
+  bertentangan dalam prompt; grounding identifier dengan kosakata dinamis
+  per panggilan (dikunci pada nomor/kode identifier, karena heading penanda
+  ayat suatu kontrak disimpan polos tanpa kata depan) serta filter
+  nilai-versus-identifier (angka yang diikuti kata satuan seperti
+  "juta"/"persen" dianggap sebagai nilai, bukan referensi bagian); bentuk
+  respons `ClarificationNeeded`; pemecahan multi-pertanyaan yang menangkap
+  pertanyaan majemuk yang digabung konjungsi meski hanya memiliki satu
+  tanda tanya di akhir, dan tidak pernah diam-diam menghilangkan
+  sub-pertanyaan; deteksi penolakan/keraguan dwibahasa (ID + EN);
+  disclaimer tingkat keyakinan OCR dan potensi fabrikasi yang ditampilkan
+  langsung pada teks jawaban, bukan hanya dicatat di log.
+- [app/sync_documents.py](app/sync_documents.py): satu fungsi rekonsiliasi
+  yang digunakan bersama oleh job APScheduler (berjalan sesuai
+  `SYNC_INTERVAL_MINUTES`), endpoint `/sync`, dan tombol sidebar Streamlit.
+- [app/database.py](app/database.py): pembacaan dengan paginasi, cache
+  dengan TTL singkat untuk daftar nama file terindeks, penyimpanan
+  chat/sesi, jumlah token per pesan, serta log penandaan jawaban
+  (`human_flag`/`flag_category`/`corrected_answer`, dapat diekspor melalui
+  `/export_flags`).
+- [app/api.py](app/api.py): `/ask`, `/sync`, `/sources`; `/documents`,
+  `/documents/{filename}/preview` (thumbnail dan cuplikan teks), dan
+  `/documents/{filename}/download` (divalidasi jalurnya terhadap daftar
+  sumber terindeks, bukan pencarian filesystem mentah); `/sessions`
+  (list/create), `/sessions/{id}/history`; `/flag/{log_id}`,
+  `/export_flags`.
+- [`../frontend-streamlit/streamlit_app.py`](../frontend-streamlit/streamlit_app.py):
+  UI bertema gelap (`.streamlit/config.toml` menjadi satu-satunya sumber
+  kebenaran untuk warna; CSS kustom dibatasi hanya untuk spacing/border,
+  semua warna dipilih berdasarkan palet tema itu sendiri) dengan daftar
+  dokumen sidebar vertikal polos (tanpa pengelompokan berdasarkan jenis;
+  daftar yang dapat di-scroll secara ringkas bekerja lebih baik
+  dibandingkan kartu yang dikelompokkan pada 1.177+ dokumen), panel preview
+  yang dapat ditutup/dibuka kembali, daftar sesi yang dapat dialihkan
+  secara nyata (judul otomatis dari pertanyaan pertama tiap sesi, urutan
+  terbaru lebih dahulu, dengan total penggunaan token per sesi), tombol
+  "New chat", kontrol penandaan manusia di bawah setiap jawaban (terhubung
+  ke `/flag/{log_id}`), dan disclaimer tetap di bawah setiap jawaban AI.
 
-## Known limitations carried over (see rebuild spec Section 8)
+## Keterbatasan yang masih berlaku (lihat spesifikasi rebuild Bagian 8)
 
-- Non-bold, running-header-style headings (neither bold nor first-line-of-page)
-  are not detected. No blanket "short line = heading" rule was added, since
-  that floods results with false positives on documents with many short
-  labeled fields. The inverse also happens occasionally: a short body
-  sentence that happens to be a page's first line can get misdetected as a
-  heading, adding noise to broad-category listings.
-- Flat top-k embedding search still loses to densely-padded, near-identical
-  boilerplate before reranking is applied; reranking and the exact-identifier
-  boost close most of that gap for named-document questions, but a bare
-  generic-identifier question with no named document still relies on
-  embedding + rerank alone.
-- No reliable automated fabrication detector when no real answer exists in
-  context. Mitigated with a visible disclaimer under every answer plus the
-  human-flagging system (`/flag/{log_id}`, `/export_flags`), not prevented
-  outright — a real flag control is wired into the Streamlit UI under each
-  answer.
-- `_GENERIC_IDENTIFIER_PATTERN` (ambiguity detection) and `_CATEGORY_WORDS`
-  (broad-category listing) in `retrieval.py` are still a fixed
-  `(pasal|lampiran|bab)` list, unlike the exact-identifier boost and the
-  shorthand-matching regex, which were generalized to derive their
-  vocabulary from real indexed content. Same latent risk if ported to a
-  document type using different words for these two features specifically;
-  not yet hit by a real test case.
-- The cross-encoder reranker (~470MB) adds real memory pressure on this
-  8GB machine on top of the embedder, Ollama, and ChromaDB; it has worked
-  in testing but with little headroom, and is worth watching for OOM-style
-  flakiness under heavier load.
+- Heading dengan gaya running-header yang tidak tebal (bukan tebal maupun
+  baris pertama halaman) tidak terdeteksi. Aturan umum "baris pendek =
+  heading" sengaja tidak ditambahkan, karena hal itu akan membanjiri hasil
+  dengan false positive pada dokumen yang memiliki banyak label field
+  pendek. Kebalikannya juga kadang terjadi: kalimat isi yang pendek dan
+  kebetulan menjadi baris pertama suatu halaman bisa salah terdeteksi
+  sebagai heading, menambah noise pada pencantuman kategori luas.
+- Pencarian embedding top-k yang datar masih kalah dibandingkan boilerplate
+  yang padat dan hampir identik sebelum reranking diterapkan; reranking dan
+  boost identifier eksak menutup sebagian besar celah tersebut untuk
+  pertanyaan dengan dokumen bernama, tetapi pertanyaan dengan identifier
+  generik polos tanpa dokumen bernama masih bergantung sepenuhnya pada
+  embedding plus rerank.
+- Belum ada detektor fabrikasi otomatis yang andal saat tidak ada jawaban
+  nyata dalam konteks. Hal ini dimitigasi dengan disclaimer yang tampil
+  jelas di bawah setiap jawaban beserta sistem penandaan manusia
+  (`/flag/{log_id}`, `/export_flags`), bukan dicegah sepenuhnya; kontrol
+  flag yang sesungguhnya telah terpasang di UI Streamlit di bawah setiap
+  jawaban.
+- `_GENERIC_IDENTIFIER_PATTERN` (deteksi ambiguitas) dan `_CATEGORY_WORDS`
+  (pencantuman kategori luas) di `retrieval.py` masih berupa daftar tetap
+  `(pasal|lampiran|bab)`, berbeda dengan boost identifier eksak dan regex
+  pencocokan singkatan yang sudah digeneralisasi untuk menurunkan
+  kosakatanya dari konten terindeks yang sesungguhnya. Risiko laten yang
+  sama berlaku apabila diterapkan pada jenis dokumen yang menggunakan kata
+  berbeda khusus untuk kedua fitur ini; belum pernah terbukti pada kasus
+  uji nyata.
+- Reranker cross-encoder (~470MB) menambah tekanan memori nyata pada mesin
+  8GB ini, di atas beban embedder, Ollama, dan ChromaDB; sejauh ini
+  berfungsi baik dalam pengujian namun dengan ruang yang sangat terbatas,
+  dan perlu diwaspadai potensi ketidakstabilan bergaya OOM pada beban yang
+  lebih berat.

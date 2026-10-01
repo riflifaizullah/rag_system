@@ -1,76 +1,76 @@
-# STK Online — RAG system for PT Pertamina Drilling Services Indonesia
+# STK Online: Sistem RAG untuk PT Pertamina Drilling Services Indonesia
 
-Internal document Q&A system over ~1,177 real SOPs, contracts, and TKO/TKI/TKPA
-procedures. One shared Python backend (FastAPI + ChromaDB + sqlite + local
-Ollama — ingestion, retrieval, generation all live here) that any frontend
-talks to over plain HTTP. Kept as independent top-level folders so each piece
-can be developed and run on its own:
+Sistem tanya jawab dokumen internal untuk sekitar 1.177 SOP, kontrak, dan prosedur TKO/TKI/TKPA nyata.
+Satu backend Python bersama (FastAPI + ChromaDB + sqlite + Ollama lokal, mencakup ingestion,
+retrieval, dan generation semuanya ada di sini) yang dapat diakses oleh frontend mana pun
+melalui HTTP biasa. Disimpan sebagai folder tingkat atas yang independen agar setiap bagian
+dapat dikembangkan dan dijalankan secara terpisah:
 
-| Folder | Status | What it is |
+| Folder | Status | Apa isinya |
 |---|---|---|
-| [`backend/`](backend/README.md) | **Working** | The entire RAG engine: FastAPI (`app/api.py`), ingestion, retrieval, generation, ChromaDB/sqlite, plus the real corpus data. Frontend-agnostic — nothing in here knows or cares which UI is calling it. |
-| [`dotnet/`](dotnet/README.md) | **Complete — primary frontend** | A full Blazor Server (.NET 8) website matching the project's UI mockup: chat, session history, document search/preview with resizable panel and native PDF rendering, flagging, dark/light theme. |
-| [`frontend-streamlit/`](frontend-streamlit/streamlit_app.py) | **Working — legacy/prototype** | The original UI: a thin Streamlit client that only calls the backend's HTTP API. Kept around as a fast iteration surface; the Blazor website above is the one being built out going forward. |
+| [`backend/`](backend/README.md) | **Berfungsi** | Seluruh mesin RAG: FastAPI (`app/api.py`), ingestion, retrieval, generation, ChromaDB/sqlite, beserta data korpus sesungguhnya. Tidak bergantung pada frontend tertentu, tidak ada yang tahu atau peduli UI mana yang memanggilnya. |
+| [`dotnet/`](dotnet/README.md) | **Selesai, frontend utama** | Situs web Blazor Server (.NET 8) lengkap yang sesuai dengan mockup UI proyek ini: chat, riwayat sesi, pencarian/pratinjau dokumen dengan panel yang dapat diubah ukurannya dan rendering PDF native, penandaan, serta tema gelap/terang. |
+| [`frontend-streamlit/`](frontend-streamlit/streamlit_app.py) | **Berfungsi, legacy/prototipe** | UI awal: klien Streamlit ringan yang hanya memanggil HTTP API backend. Tetap dipertahankan sebagai sarana iterasi cepat; situs Blazor di atas adalah yang terus dikembangkan ke depannya. |
 
-**There are two working frontend versions** — Streamlit (legacy, Python, fast to iterate on) and .NET/Blazor Server (current, the full-featured one matching the mockup). Both are pure HTTP clients of the same backend; neither owns it, and switching between them requires zero backend changes.
+**Ada dua versi frontend yang berfungsi**, Streamlit (legacy, Python, cepat untuk diiterasi) dan .NET/Blazor Server (saat ini, versi lengkap yang sesuai dengan mockup). Keduanya murni klien HTTP dari backend yang sama; tidak ada yang memilikinya, dan berpindah di antara keduanya tidak memerlukan perubahan apa pun pada backend.
 
-**The backend is not "Streamlit's backend"** — it's a standalone HTTP service. Each frontend is just one client of it, calling the same endpoints.
+**Backend ini bukan "backend milik Streamlit"**, melainkan layanan HTTP yang berdiri sendiri. Setiap frontend hanyalah salah satu klien dari layanan tersebut, memanggil endpoint yang sama.
 
-## Where to look
+## Ke mana harus mencari
 
-- **Running this:** [`DEPLOYMENT.md`](DEPLOYMENT.md) — prerequisites, the gitignored corpus/index data you need separately, a machine-specific path to check, and real gotchas hit while building this (including a Windows-specific one).
-- **How the system is built, module by module, with diagrams:** [`ARCHITECTURE.md`](ARCHITECTURE.md).
-- **Evaluation results, every kind of testing in this project, ingestion stats, bugs found/fixed:** [`EVALUATION_RESULTS.md`](EVALUATION_RESULTS.md).
-- **Current project state and mockup notes** (tech stack is already covered above, in `ARCHITECTURE.md`/`DEPLOYMENT.md`): `NOTES.md` — kept local only (gitignored), ask the repo owner if you need it.
+- **Menjalankan sistem ini:** [`DEPLOYMENT.md`](DEPLOYMENT.md), berisi prasyarat, data korpus/indeks yang di-gitignore dan perlu disiapkan terpisah, path khusus mesin yang perlu diperiksa, serta kendala nyata yang ditemui saat membangun sistem ini (termasuk satu kendala khusus Windows).
+- **Bagaimana sistem ini dibangun, modul demi modul, lengkap dengan diagram:** [`ARCHITECTURE.md`](ARCHITECTURE.md).
+- **Hasil evaluasi, semua jenis pengujian dalam proyek ini, statistik ingestion, bug yang ditemukan/diperbaiki:** [`EVALUATION_RESULTS.md`](EVALUATION_RESULTS.md).
+- **Status proyek saat ini dan catatan mockup** (tech stack sudah dibahas di atas, di `ARCHITECTURE.md`/`DEPLOYMENT.md`): `NOTES.md`, disimpan hanya secara lokal (di-gitignore), tanyakan kepada pemilik repo jika memerlukannya.
 
-## Directory structure
+## Struktur direktori
 
 ```
 rag_system_stk/
-├── README.md                 you are here
-├── ARCHITECTURE.md           how the system is built, module by module + diagrams
-├── EVALUATION_RESULTS.md     every kind of testing in this project + latest results
-├── DEPLOYMENT.md             how to actually run this elsewhere
+├── README.md                 Anda sedang membaca ini
+├── ARCHITECTURE.md           bagaimana sistem ini dibangun, modul demi modul + diagram
+├── EVALUATION_RESULTS.md     semua jenis pengujian dalam proyek ini + hasil terbaru
+├── DEPLOYMENT.md             cara menjalankan sistem ini di tempat lain
 │
-├── backend/                  the RAG engine -- frontend-agnostic, both UIs call this
+├── backend/                  mesin RAG -- tidak bergantung pada frontend, dipanggil oleh kedua UI
 │   ├── app/                  api.py, retrieval.py, generation.py, ingestion.py,
-│   │                         database.py, config.py, eval/test scripts, ...
-│   ├── README.md              backend-specific setup notes
-│   └── MIGRATION.md           machine-migration history/checklist
+│   │                         database.py, config.py, skrip eval/test, ...
+│   ├── README.md              catatan setup khusus backend
+│   └── MIGRATION.md           riwayat/checklist migrasi mesin
 │
-├── dotnet/                   the primary frontend -- Blazor Server (.NET 8)
-│   ├── README.md              what it is, how it talks to the backend
-│   └── RagSystemWeb/          the actual website project
-│       ├── Pages/             Index.razor (page layout), _Host.cshtml/_Layout.cshtml
+├── dotnet/                   frontend utama -- Blazor Server (.NET 8)
+│   ├── README.md              penjelasan dan cara komunikasinya dengan backend
+│   └── RagSystemWeb/          proyek situs web sesungguhnya
+│       ├── Pages/             Index.razor (tata letak halaman), _Host.cshtml/_Layout.cshtml
 │       ├── Shared/             Sidebar.razor, ChatColumn.razor, PreviewPanel.razor
-│       ├── Services/           ApiClient.cs (backend HTTP calls), BackendLauncher.cs
-│       ├── State/              ChatState.cs (chat/session logic, not visual)
-│       ├── Models/              DTOs matching the backend's JSON shapes
-│       └── wwwroot/             css/app.css (all styling), js/ (theme + resize)
+│       ├── Services/           ApiClient.cs (pemanggilan HTTP ke backend), BackendLauncher.cs
+│       ├── State/              ChatState.cs (logika chat/sesi, bukan tampilan)
+│       ├── Models/              DTO yang sesuai dengan bentuk JSON backend
+│       └── wwwroot/             css/app.css (semua styling), js/ (tema + resize)
 │
-└── frontend-streamlit/       the legacy/prototype frontend (Python)
+└── frontend-streamlit/       frontend legacy/prototipe (Python)
     └── streamlit_app.py
 ```
 
-This is only what's actually in the repo. Several folders exist locally but are gitignored (real internal document content, or regenerable build output) and won't show up after a fresh clone — see [`DEPLOYMENT.md`](DEPLOYMENT.md) for which ones you need to populate yourself, and `.gitignore` for the full list and why.
+Ini hanya yang benar-benar ada di repo. Beberapa folder ada secara lokal tetapi di-gitignore (konten dokumen internal sesungguhnya, atau output build yang bisa dibuat ulang) dan tidak akan muncul setelah clone baru, lihat [`DEPLOYMENT.md`](DEPLOYMENT.md) untuk folder mana saja yang perlu Anda isi sendiri, dan `.gitignore` untuk daftar lengkap beserta alasannya.
 
-## Common commands
+## Perintah umum
 
-| Task | Command |
+| Tugas | Perintah |
 |---|---|
-| **Run the website** (also auto-launches the backend) | `cd dotnet/RagSystemWeb` then `dotnet run` — open `http://localhost:5080` |
-| **Run the backend by itself** | `cd backend` then `uvicorn app.api:app --host 0.0.0.0 --port 8000` |
-| **Run the legacy Streamlit UI** | `cd frontend-streamlit` then `streamlit run streamlit_app.py` (also auto-launches the backend) |
-| **Check the backend is actually up** | `curl http://localhost:8000/health` → `{"status":"ok","model":"qwen3.5:9b"}` |
-| **Check any other endpoint** | `curl http://localhost:8000/documents` (list), `curl http://localhost:8000/sessions` (sessions) — see [`ARCHITECTURE.md`](ARCHITECTURE.md) §8 for the full endpoint table with file:line references |
-| **Watch the backend's own status page in a browser** | `http://localhost:8000/monitor` |
-| **Trigger a corpus resync** (new/changed/deleted files) | `curl -X POST http://localhost:8000/sync` |
-| **Run backend unit tests** | Local-only (`backend/app/test_units.py` is gitignored test tooling, not in this repo) — ask the repo owner if you need it. |
-| **Run website unit tests** | `cd dotnet/RagSystemWeb.Tests` then `dotnet test` |
-| **Rebuild the index from scratch** | `cd backend` then `python -m app.sync_documents` |
+| **Menjalankan situs web** (juga otomatis menjalankan backend) | `cd dotnet/RagSystemWeb` lalu `dotnet run`, buka `http://localhost:5080` |
+| **Menjalankan backend saja** | `cd backend` lalu `uvicorn app.api:app --host 0.0.0.0 --port 8000` |
+| **Menjalankan UI Streamlit legacy** | `cd frontend-streamlit` lalu `streamlit run streamlit_app.py` (juga otomatis menjalankan backend) |
+| **Memeriksa backend sudah aktif** | `curl http://localhost:8000/health` → `{"status":"ok","model":"qwen3.5:9b"}` |
+| **Memeriksa endpoint lainnya** | `curl http://localhost:8000/documents` (daftar), `curl http://localhost:8000/sessions` (sesi), lihat [`ARCHITECTURE.md`](ARCHITECTURE.md) §8 untuk tabel endpoint lengkap dengan referensi file:baris |
+| **Memantau halaman status backend di browser** | `http://localhost:8000/monitor` |
+| **Memicu resync korpus** (file baru/berubah/dihapus) | `curl -X POST http://localhost:8000/sync` |
+| **Menjalankan unit test backend** | Hanya lokal (`backend/app/test_units.py` adalah alat pengujian yang di-gitignore, tidak ada di repo ini), tanyakan kepada pemilik repo jika memerlukannya. |
+| **Menjalankan unit test situs web** | `cd dotnet/RagSystemWeb.Tests` lalu `dotnet test` |
+| **Membangun ulang indeks dari awal** | `cd backend` lalu `python -m app.sync_documents` |
 
-See [`DEPLOYMENT.md`](DEPLOYMENT.md) for prerequisites these commands assume (Ollama running, Python env, .NET SDK) and known gotchas.
+Lihat [`DEPLOYMENT.md`](DEPLOYMENT.md) untuk prasyarat yang diasumsikan oleh perintah-perintah ini (Ollama berjalan, environment Python, .NET SDK) serta kendala yang sudah diketahui.
 
-## Why separate folders
+## Mengapa folder dipisahkan
 
-`backend/` is the one thing every frontend depends on and none of them own — it stays put regardless of which UI is being worked on. `dotnet/` and `frontend-streamlit/` are both independent clients of it, built and run on their own. This split means either frontend keeps working undisturbed no matter what changes in the other — there is always a working system to show.
+`backend/` adalah satu-satunya hal yang dibutuhkan oleh setiap frontend dan tidak dimiliki oleh satu pun dari mereka, backend ini tetap ada apa pun UI yang sedang dikerjakan. `dotnet/` dan `frontend-streamlit/` sama-sama merupakan klien independen dari backend tersebut, dibangun dan dijalankan secara mandiri. Pemisahan ini membuat setiap frontend tetap berfungsi tanpa terganggu apa pun perubahan yang terjadi pada frontend lainnya, sehingga selalu ada sistem yang berjalan untuk didemonstrasikan.
