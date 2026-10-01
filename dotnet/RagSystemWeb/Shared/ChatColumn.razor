@@ -35,7 +35,7 @@
                         <svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M6 2h9l5 5v15H6z" stroke="var(--accent-text)" stroke-width="1.9" stroke-linejoin="round"></path></svg>
                     </div>
                     <div style="display: flex; flex-direction: column; gap: 9px; min-width: 0;">
-                        <div style="font-size: 13.5px; line-height: 1.7; white-space: pre-wrap;">@message.Text</div>
+                        <div style="font-size: 13.5px; line-height: 1.7; white-space: pre-wrap;">@((MarkupString)message.FormattedHtml)</div>
 
                         @if (message.Sources.Count > 0)
                         {

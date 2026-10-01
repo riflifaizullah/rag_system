@@ -1,3 +1,6 @@
+using System.Net;
+using System.Text.RegularExpressions;
+
 namespace RagSystemWeb.State;
 
 /// <summary>
@@ -13,6 +16,16 @@ public sealed class ChatMessageState
     public int? LogId { get; init; }
 
     public bool IsAssistant => Role == "assistant";
+
+    private static readonly Regex BoldMarkdown = new(@"\*\*(.+?)\*\*", RegexOptions.Compiled);
+
+    // The LLM writes real Markdown (mostly **bold**) into its answers, but
+    // the UI was rendering it as plain text -- literal asterisks instead of
+    // bold. HTML-encode first (this is LLM/document-derived text, not a
+    // trusted string) so only the specific <strong> tags this method adds
+    // itself ever reach the page, then convert just that one construct --
+    // not a full Markdown renderer, nothing else has shown up in practice.
+    public string FormattedHtml => BoldMarkdown.Replace(WebUtility.HtmlEncode(Text), "<strong>$1</strong>");
 
     // Exact disclaimer text, per NOTES.md §5 -- must stay identical across
     // every frontend that's ever been built for this project.
