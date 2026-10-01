@@ -1,158 +1,75 @@
-# STK Online RAG — Temporary Laptop Build
+# STK Online — RAG system for PT Pertamina Drilling Services Indonesia
 
-Local rebuild of the STK Online RAG system for continued development while
-the main development laptop (HP 15 Gaming dk1064-TX) is in for repair. This
-is a functional-testing setup on weaker hardware (8GB RAM, MX330 2GB VRAM),
-not a reproduction of the full 600-file benchmark. It has grown well beyond
-the original small rebuild: reranking, OCR, structure-aware chunking, a
-document preview UI, real chat sessions, and a dark theme all landed here
-in later passes. This file describes what's actually in the system now.
+Internal document Q&A system over ~1,177 real SOPs, contracts, and TKO/TKI/TKPA
+procedures. One shared Python backend (FastAPI + ChromaDB + sqlite + local
+Ollama — ingestion, retrieval, generation all live here) that any frontend
+talks to over plain HTTP. Kept as independent top-level folders so each piece
+can be developed and run on its own:
 
-## Model choice
+| Folder | Status | What it is |
+|---|---|---|
+| [`backend/`](backend/README.md) | **Working** | The entire RAG engine: FastAPI (`app/api.py`), ingestion, retrieval, generation, ChromaDB/sqlite, plus the real corpus data. Frontend-agnostic — nothing in here knows or cares which UI is calling it. |
+| [`dotnet/`](dotnet/README.md) | **Complete — primary frontend** | A full Blazor Server (.NET 8) website matching the project's UI mockup: chat, session history, document search/preview with resizable panel and native PDF rendering, flagging, dark/light theme. |
+| [`frontend-streamlit/`](frontend-streamlit/streamlit_app.py) | **Working — legacy/prototype** | The original UI: a thin Streamlit client that only calls the backend's HTTP API. Kept around as a fast iteration surface; the Blazor website above is the one being built out going forward. |
 
-The main-machine build uses `aisingapore/Llama-SEA-LION-v2-8B-IT`. That
-does not fit comfortably in 8GB RAM alongside Ollama + ChromaDB + FastAPI +
-Streamlit + the embedding model + the reranker. This build uses
-`qwen2.5:3b-instruct-q4_K_M`, which has reasonable Indonesian support and
-fits in 8GB RAM. Expect weaker performance on Indonesian legal/technical
-phrasing than the 8B SEA-LION — an accepted tradeoff for this temporary
-setup, not something to fully compensate for in prompting.
+**There are two working frontend versions** — Streamlit (legacy, Python, fast to iterate on) and .NET/Blazor Server (current, the full-featured one matching the mockup). Both are pure HTTP clients of the same backend; neither owns it, and switching between them requires zero backend changes.
 
-## Setup
+**The backend is not "Streamlit's backend"** — it's a standalone HTTP service. Each frontend is just one client of it, calling the same endpoints.
 
-```bash
-py -m venv .venv
-.venv\Scripts\python.exe -m pip install -r requirements.txt
+## Where to look
+
+- **Running this:** [`DEPLOYMENT.md`](DEPLOYMENT.md) — prerequisites, the gitignored corpus/index data you need separately, a machine-specific path to check, and real gotchas hit while building this (including a Windows-specific one).
+- **How the system is built, module by module, with diagrams:** [`ARCHITECTURE.md`](ARCHITECTURE.md).
+- **Evaluation results, every kind of testing in this project, ingestion stats, bugs found/fixed:** [`EVALUATION_RESULTS.md`](EVALUATION_RESULTS.md).
+- **Current project state, tech stack, and mockup notes:** `NOTES.md` — kept local only (gitignored), ask the repo owner if you need it.
+
+## Directory structure
+
+```
+rag_system_stk/
+├── README.md                 you are here
+├── ARCHITECTURE.md           how the system is built, module by module + diagrams
+├── EVALUATION_RESULTS.md     every kind of testing in this project + latest results
+├── DEPLOYMENT.md             how to actually run this elsewhere
+│
+├── backend/                  the RAG engine -- frontend-agnostic, both UIs call this
+│   ├── app/                  api.py, retrieval.py, generation.py, ingestion.py,
+│   │                         database.py, config.py, eval/test scripts, ...
+│   ├── README.md              backend-specific setup notes
+│   └── MIGRATION.md           machine-migration history/checklist
+│
+├── dotnet/                   the primary frontend -- Blazor Server (.NET 8)
+│   ├── README.md              what it is, how it talks to the backend
+│   └── RagSystemWeb/          the actual website project
+│       ├── Pages/             Index.razor (page layout), _Host.cshtml/_Layout.cshtml
+│       ├── Shared/             Sidebar.razor, ChatColumn.razor, PreviewPanel.razor
+│       ├── Services/           ApiClient.cs (backend HTTP calls), BackendLauncher.cs
+│       ├── State/              ChatState.cs (chat/session logic, not visual)
+│       ├── Models/              DTOs matching the backend's JSON shapes
+│       └── wwwroot/             css/app.css (all styling), js/ (theme + resize)
+│
+└── frontend-streamlit/       the legacy/prototype frontend (Python)
+    └── streamlit_app.py
 ```
 
-Torch pulls a large default wheel with bundled CUDA on Windows; on a slow
-connection, install the CPU-only wheel first (`pip install torch
---index-url https://download.pytorch.org/whl/cpu`), then run the full
-`pip install -r requirements.txt` — it will see torch already satisfied.
+This is only what's actually in the repo. Several folders exist locally but are gitignored (real internal document content, or regenerable build output) and won't show up after a fresh clone — see [`DEPLOYMENT.md`](DEPLOYMENT.md) for which ones you need to populate yourself, and `.gitignore` for the full list and why.
 
-External binaries needed beyond pip packages:
+## Common commands
 
-- **Ollama** (`winget install UB-Mannheim... ` no — `winget install
-  Ollama.Ollama`), then `ollama pull qwen2.5:3b-instruct-q4_K_M`.
-- **Poppler** (`winget install oschwartz10612.Poppler`) — required by
-  `pdf2image` for PDF-to-image rendering, used both by OCR ingestion and
-  the `/documents/{filename}/preview` thumbnail endpoint.
-- **Tesseract OCR + Indonesian language pack** (`winget install
-  UB-Mannheim.TesseractOCR`), then download `ind.traineddata` from
-  `tesseract-ocr/tessdata_fast` into a tessdata directory and point
-  `TESSDATA_PREFIX` at it (Program Files may need admin rights to write
-  directly into its own tessdata folder — a user-writable copy works fine).
+| Task | Command |
+|---|---|
+| **Run the website** (also auto-launches the backend) | `cd dotnet/RagSystemWeb` then `dotnet run` — open `http://localhost:5080` |
+| **Run the backend by itself** | `cd backend` then `uvicorn app.api:app --host 0.0.0.0 --port 8000` |
+| **Run the legacy Streamlit UI** | `cd frontend-streamlit` then `streamlit run streamlit_app.py` (also auto-launches the backend) |
+| **Check the backend is actually up** | `curl http://localhost:8000/health` → `{"status":"ok","model":"qwen3.5:9b"}` |
+| **Check any other endpoint** | `curl http://localhost:8000/documents` (list), `curl http://localhost:8000/sessions` (sessions) — see [`ARCHITECTURE.md`](ARCHITECTURE.md) §8 for the full endpoint table with file:line references |
+| **Watch the backend's own status page in a browser** | `http://localhost:8000/monitor` |
+| **Trigger a corpus resync** (new/changed/deleted files) | `curl -X POST http://localhost:8000/sync` |
+| **Run backend unit tests** | `cd backend` then `python -m pytest app/test_units.py -v` |
+| **Rebuild the index from scratch** | `cd backend` then `python -m app.sync_documents` |
 
-Generate the small synthetic test corpus (10 contracts + 8 SOPs, per
-Section 10 of the rebuild spec — file count kept the same across later
-passes, only per-document length and scanned-page ratio grew):
+See [`DEPLOYMENT.md`](DEPLOYMENT.md) for prerequisites these commands assume (Ollama running, Python env, .NET SDK) and known gotchas.
 
-```bash
-.venv\Scripts\python.exe -m app.corpus_generator.generate
-```
+## Why separate folders
 
-Run the API (this also starts the APScheduler sync job and ingests on
-first `/sync` call):
-
-```bash
-.venv\Scripts\uvicorn.exe app.api:app --host 0.0.0.0 --port 8000
-```
-
-Trigger the first ingestion:
-
-```bash
-curl -X POST http://localhost:8000/sync
-```
-
-Run the Streamlit frontend (separate terminal):
-
-```bash
-.venv\Scripts\streamlit.exe run streamlit_app.py
-```
-
-Run the scaled-down grounded evaluation:
-
-```bash
-.venv\Scripts\python.exe -m app.evaluate_grounded
-```
-
-## What's in the system
-
-- [app/retrieval.py](app/retrieval.py) — `source_filter`-aware `retrieve()`;
-  a wider embedding candidate set reranked by a cross-encoder
-  (`cross-encoder/mmarco-mMiniLMv2-L12-H384-v1`) before the top-k is passed
-  on; an exact-identifier boost that overrides both when the question names
-  a specific clause/section number (dynamically built from real indexed
-  filenames and retrieved chunk text, not a hardcoded vocabulary); ordered
-  `named_target_sources()` with connector- and contract-type-tolerant
-  shorthand matching ("kontrak 106", "kontrak nomor 106", "kontrak
-  konsultasi 104" all resolve); ambiguity detection scoped to bare generic
-  identifiers; scoped (never corpus-wide) heading lookups; broad-category
-  deterministic listing.
-- [app/ingestion.py](app/ingestion.py) — heading detection with the 5-line
-  merge cap and the bold-sentence exclusion; OCR fallback for scanned pages
-  with grayscale + Otsu binarization + deskew preprocessing and per-page
-  confidence capture; structure-aware chunking that splits on detected
-  headings first, falling back to clause/step-marker splitting and then a
-  sliding window for content with no clean structure.
-- [app/generation.py](app/generation.py) — conflicting-value attribution in
-  the prompt; identifier grounding with a dynamic per-call vocabulary
-  (keyed on the identifier's number/code, since a contract's ayat marker
-  heading is stored bare with no leading word) and a value-vs-identifier
-  filter (a number followed by a unit word like "juta"/"persen" is a value,
-  not a section reference); `ClarificationNeeded` response shape;
-  multi-question splitting that catches a conjunction-joined compound
-  question even with only one trailing "?", and never silently drops a
-  sub-question; bilingual (ID + EN) refusal/hedging detection; OCR-
-  confidence and fabrication disclaimers surfaced directly in the answer
-  text, not just logged.
-- [app/sync_documents.py](app/sync_documents.py) — one reconciliation
-  function shared by the APScheduler job (runs on `SYNC_INTERVAL_MINUTES`),
-  the `/sync` endpoint, and the Streamlit sidebar button.
-- [app/database.py](app/database.py) — paginated reads, short-TTL cache for
-  the indexed-filenames listing, chat/session storage, per-message token
-  counts, and the answer-flagging log (`human_flag`/`flag_category`/
-  `corrected_answer`, exportable via `/export_flags`).
-- [app/api.py](app/api.py) — `/ask`, `/sync`, `/sources`; `/documents`,
-  `/documents/{filename}/preview` (thumbnail + text snippet), and
-  `/documents/{filename}/download` (path-validated against the indexed
-  sources list, not a raw filesystem lookup); `/sessions` (list/create),
-  `/sessions/{id}/history`; `/flag/{log_id}`, `/export_flags`.
-- [streamlit_app.py](streamlit_app.py) — dark-themed (`.streamlit/config.toml`
-  is the single source of truth for color; kept custom CSS to spacing/
-  borders/badges only, all colors chosen against the theme's own palette)
-  UI with a sidebar document library grouped by Kontrak/SOP with preview
-  cards, a real switchable session list (auto-titled from each session's
-  first question, most-recent-first, with a per-session token-usage
-  total), a "New chat" button, and the main chat + document-preview panel.
-
-## Known limitations carried over (see rebuild spec Section 8)
-
-- Non-bold, running-header-style headings (neither bold nor first-line-of-page)
-  are not detected. No blanket "short line = heading" rule was added, since
-  that floods results with false positives on documents with many short
-  labeled fields. The inverse also happens occasionally: a short body
-  sentence that happens to be a page's first line can get misdetected as a
-  heading, adding noise to broad-category listings.
-- Flat top-k embedding search still loses to densely-padded, near-identical
-  boilerplate before reranking is applied; reranking and the exact-identifier
-  boost close most of that gap for named-document questions, but a bare
-  generic-identifier question with no named document still relies on
-  embedding + rerank alone.
-- No reliable automated fabrication detector when no real answer exists in
-  context. Mitigated with a visible disclaimer plus the human-flagging
-  system (`/flag/{log_id}`, `/export_flags`), not prevented outright. The
-  flag/export endpoints are reachable and tested via direct API calls but
-  not yet wired into a UI control (no "flag this answer" button in
-  Streamlit).
-- `_GENERIC_IDENTIFIER_PATTERN` (ambiguity detection) and `_CATEGORY_WORDS`
-  (broad-category listing) in `retrieval.py` are still a fixed
-  `(pasal|lampiran|bab)` list, unlike the exact-identifier boost and the
-  shorthand-matching regex, which were generalized to derive their
-  vocabulary from real indexed content. Same latent risk if ported to a
-  document type using different words for these two features specifically;
-  not yet hit by a real test case.
-- The cross-encoder reranker (~470MB) adds real memory pressure on this
-  8GB machine on top of the embedder, Ollama, and ChromaDB; it has worked
-  in testing but with little headroom, and is worth watching for OOM-style
-  flakiness under heavier load.
+`backend/` is the one thing every frontend depends on and none of them own — it stays put regardless of which UI is being worked on. `dotnet/` and `frontend-streamlit/` are both independent clients of it, built and run on their own. This split means either frontend keeps working undisturbed no matter what changes in the other — there is always a working system to show.
