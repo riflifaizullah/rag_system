@@ -37,7 +37,7 @@ Later additions, layered onto the same retrieve() pipeline in this order:
     a hardcoded vocabulary, on the theory that anything corpus-specific
     (document-type words, section-keyword words) will silently go stale
     the moment this is ported to a differently-named real document set.
-    _GENERIC_IDENTIFIER_PATTERN (ambiguity detection) has NOT been
+    GENERIC_IDENTIFIER_PATTERN (ambiguity detection) has NOT been
     generalized the same way yet -- still a fixed (pasal|lampiran|bab)
     list, same latent risk, just not hit by a real test case so far.
   - enumerate-intent routing (broad_category_listing(), document_type_
@@ -356,6 +356,84 @@ def _exact_identifier_boost(question: str, source_filter: Optional[list[str]]) -
     }
 
 
+_QUOTED_SPAN_RE = re.compile(r"['‘’\"“”]([^'‘’\"“”]{3,})['‘’\"“”]")
+
+
+def _find_quoted_heading_pages(question: str, headings: list[dict]) -> list[int]:
+    """Match a real heading against a question asking for the content of
+    that heading by name (e.g. "Apa isi bagian '<heading>' pada dokumen
+    ..."), and return ALL pages that share the single best-matching heading
+    text. Confirmed live: pure similarity retrieval keeps ranking the
+    HEADING TEXT ITSELF above the real body content that follows it,
+    because the question quotes the heading almost verbatim while the body
+    text uses different wording -- on a large, heading-dense document, that
+    body content can fall out of top-k entirely even after deduplicating
+    the heading's own repeated occurrences (see _dedupe_repeated_text). A
+    running header repeated across a multi-page attachment (confirmed live:
+    the same heading text on 9 different pages of one real document) means
+    the real content could be on ANY of those pages, not just the first --
+    collecting all of them, not one arbitrary match, is what actually
+    surfaces it. Once the question is confirmed to be asking about a
+    specific, already-known real heading, bypass similarity ranking for it
+    entirely -- same principle as broad_category_listing()/
+    document_type_listing() reading the index directly for other "look it
+    up, don't rank for it" question shapes.
+
+    Only matches against an actual QUOTED span in the question, not the
+    whole question text -- confirmed live (independent review + real
+    corpus check) that matching against the whole question let a bare,
+    generic 2-word heading ("RUANG LINGKUP", "TATA CARA" -- 292 distinct
+    examples exist in this corpus, including "DAFTAR ISI") hijack retrieval
+    to an arbitrary page on ANY question mentioning those common words,
+    with no quoting intent at all. The real question shape always quotes
+    the heading; requiring that is what actually distinguishes "asking
+    about this specific heading" from a question that merely uses common
+    words. Still requires most of the heading's own distinguishing words
+    to appear within the quoted span, not just one -- same false-positive
+    guard _exact_identifier_boost already uses (min_matched tolerance) so
+    a short/generic heading doesn't match a loosely-related quote."""
+    quoted_spans = [m.group(1).lower() for m in _QUOTED_SPAN_RE.finditer(question)]
+    if not quoted_spans:
+        return []
+    best_text = None
+    best_ratio = 0.0
+    for h in headings:
+        words = [w for w in re.split(r"\s+", h["text"].strip()) if len(w) > 2]
+        if len(words) < 2:
+            continue
+        for span in quoted_spans:
+            matched = sum(1 for w in words if w.lower() in span)
+            ratio = matched / len(words)
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_text = h["text"]
+    if best_text is None or best_ratio < 0.7:
+        return []
+    return sorted({h["page"] for h in headings if h["text"] == best_text})
+
+
+def _heading_quote_boost(question: str, source_filter: Optional[list[str]], k: int) -> list[dict]:
+    if not source_filter or len(source_filter) != 1:
+        return []
+    pages = _find_quoted_heading_pages(question, get_headings_for(source_filter))
+    if not pages:
+        return []
+    collection = get_collection()
+    where = {"$and": [{"source": source_filter[0]}, {"page": {"$in": pages}}]}
+    got = collection.get(where=where, include=["documents", "metadatas"])
+    out = []
+    for doc, meta in zip(got.get("documents", []), got.get("metadatas", [])):
+        out.append({
+            "text": doc,
+            "source": meta.get("source"),
+            "page": meta.get("page"),
+            "distance": 0.0,
+            "score": 1.0,
+            "ocr_confidence": _meta_ocr_confidence(meta),
+        })
+    return out[:k]
+
+
 def _meta_ocr_confidence(meta: dict) -> Optional[float]:
     val = meta.get("ocr_confidence")
     return None if val is None or val < 0 else val
@@ -626,6 +704,38 @@ def _cosine_sim(a, b) -> float:
     return float(np.dot(a, b) / denom) if denom else 0.0
 
 
+def _dedupe_repeated_text(ordered_ids: list[str], hits_by_id: dict[str, dict]) -> list[str]:
+    # A running page header repeated verbatim across a multi-page
+    # attachment can occupy most of top-k on a query that quotes the
+    # heading -- confirmed live this crowded out the one chunk (a
+    # different page of the SAME document) that had the real body content,
+    # producing an honest but wrong "not found" despite the answer being
+    # in the corpus. Only same-source repeats collapse: two different
+    # documents sharing boilerplate text is a different, unrelated case.
+    seen: set[tuple] = set()
+    out = []
+    for hid in ordered_ids:
+        h = hits_by_id[hid]
+        key = (h["source"], h["text"])
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(hid)
+    return out
+
+
+def _apply_boost(hits: list[dict], boost_items: list[dict], k: int) -> list[dict]:
+    """Prepend forced boost items ahead of the normally-ranked hits,
+    respecting the k budget on both the boost itself and the combined
+    result. Confirmed live (independent code review): the previous inline
+    formula (`boost + hits[:max(0, k-len(boost))]`) never capped the boost
+    list itself, so a single boost bigger than k -- or several boosts
+    stacking, each prepending onto whatever the last one left -- could
+    make the final result exceed k entirely, silently blowing the budget
+    every other caller of retrieve() assumes is respected."""
+    return (boost_items[:k] + hits)[:k]
+
+
 def retrieve(question: str, source_filter: Optional[list[str]] = None, k: int = config.TOP_K) -> list[dict]:
     collection = get_collection()
     embedder = get_embedder()
@@ -672,8 +782,8 @@ def retrieve(question: str, source_filter: Optional[list[str]] = None, k: int = 
                 include=["documents", "metadatas", "distances"],
             )
             break
-        except RuntimeError:
-            if candidate_k <= 1:
+        except RuntimeError as exc:
+            if "contigious 2D array" not in str(exc) or candidate_k <= 1:
                 raise
             candidate_k = max(1, candidate_k // 2)
 
@@ -738,6 +848,7 @@ def retrieve(question: str, source_filter: Optional[list[str]] = None, k: int = 
     else:
         ordered_ids = sorted(hits_by_id.keys(), key=lambda hid: embedding_rank.get(hid, 10**6))
 
+    ordered_ids = _dedupe_repeated_text(ordered_ids, hits_by_id)
     hits = [hits_by_id[hid] for hid in ordered_ids[:candidate_k]]
 
     if config.RERANK_ENABLED:
@@ -748,7 +859,7 @@ def retrieve(question: str, source_filter: Optional[list[str]] = None, k: int = 
     boost = _exact_identifier_boost(question, source_filter)
     if boost and not any(h["text"] == boost["text"] for h in hits):
         boost.setdefault("ocr_confidence", None)
-        hits = [boost] + hits[: k - 1]
+        hits = _apply_boost(hits, [boost], k)
 
     own_doc_boosts = [
         b for b in _own_document_code_boost(source_filter)
@@ -757,7 +868,14 @@ def retrieve(question: str, source_filter: Optional[list[str]] = None, k: int = 
     if own_doc_boosts:
         for b in own_doc_boosts:
             b.setdefault("ocr_confidence", None)
-        hits = own_doc_boosts + hits[: max(0, k - len(own_doc_boosts))]
+        hits = _apply_boost(hits, own_doc_boosts, k)
+
+    heading_boosts = [
+        b for b in _heading_quote_boost(question, source_filter, k)
+        if not any(h["text"] == b["text"] for h in hits)
+    ]
+    if heading_boosts:
+        hits = _apply_boost(hits, heading_boosts, k)
 
     return hits
 
@@ -766,7 +884,11 @@ def retrieve(question: str, source_filter: Optional[list[str]] = None, k: int = 
 # Ambiguity detection
 # ---------------------------------------------------------------------------
 
-_GENERIC_IDENTIFIER_PATTERN = re.compile(
+# Public (no leading underscore) -- build_eval_questions.py imports this
+# directly so its bare-identifier eval category matches the exact same
+# definition detect_ambiguity() uses, instead of a second regex drifting
+# out of sync with it.
+GENERIC_IDENTIFIER_PATTERN = re.compile(
     r"\b(pasal|lampiran|bab)\s+([A-Za-z]?\d+)", re.IGNORECASE
 )
 
@@ -776,33 +898,46 @@ class AmbiguityResult:
         self.candidates = candidates
 
 
-def detect_ambiguity(question: str, hits: list[dict], named_sources: list[str]) -> Optional[AmbiguityResult]:
-    """Bare generic identifiers (e.g. "Pasal 8") with no named document and
-    multiple close-scoring distinct sources should trigger clarification
-    instead of silently picking one. Bypassed whenever a document is
-    actually named in the question."""
+def detect_ambiguity(question: str, named_sources: list[str]) -> Optional[AmbiguityResult]:
+    """Bare generic identifiers (e.g. "Pasal 8") with no named document,
+    where that exact identifier appears as a heading in 2+ real documents,
+    should trigger clarification instead of silently picking one. Bypassed
+    whenever a document is actually named in the question.
+
+    Structural (heading-count), not score-based -- confirmed live this
+    matters (real eval false positive at 1k-corpus scale, "Apa isi Lampiran
+    12?", which genuinely appears as a heading in 15+ documents). A
+    reranked-score gap (the previous approach, and still what
+    generate_answer()'s own competing-sources logic uses) conflates "one
+    document has richer retrievable content under this heading" with "the
+    identifier is unambiguous": most of those 15 documents' Lampiran-12
+    sections are a single-line table-of-contents entry with little text,
+    so only the one document with substantive content scored high enough
+    to separate cleanly -- a wide score gap despite 14 other equally valid
+    candidates. Heading presence doesn't have that bias. Reuses the exact
+    same (identifier -> sources) grouping build_eval_questions.py's
+    build_ambiguous_identifier() already uses to build ground truth, so
+    detection and ground truth agree by construction.
+    """
     if named_sources:
         return None
-    if not _GENERIC_IDENTIFIER_PATTERN.search(question):
+    match = GENERIC_IDENTIFIER_PATTERN.search(question)
+    if not match:
         return None
 
-    # collect best score per distinct source
-    best_per_source: dict[str, float] = {}
-    for h in hits:
-        src = h["source"]
-        if src not in best_per_source or h["score"] > best_per_source[src]:
-            best_per_source[src] = h["score"]
+    identifier = f"{match.group(1).lower()} {match.group(2)}"
+    grouped = database.get_all_headings_grouped_by_source()
+    matching_sources: set[str] = set()
+    for source, headings in grouped.items():
+        for h in headings:
+            m = GENERIC_IDENTIFIER_PATTERN.search(h["text"])
+            if m and f"{m.group(1).lower()} {m.group(2)}" == identifier:
+                matching_sources.add(source)
+                break
 
-    if len(best_per_source) < 2:
+    if len(matching_sources) < 2:
         return None
-
-    ranked = sorted(best_per_source.items(), key=lambda t: t[1], reverse=True)
-    top_score = ranked[0][1]
-    second_score = ranked[1][1]
-    if (top_score - second_score) <= config.AMBIGUITY_SCORE_GAP:
-        candidates = [src for src, score in ranked if (top_score - score) <= config.AMBIGUITY_SCORE_GAP]
-        return AmbiguityResult(candidates=candidates)
-    return None
+    return AmbiguityResult(candidates=sorted(matching_sources))
 
 
 # ---------------------------------------------------------------------------
@@ -814,6 +949,29 @@ def get_headings_for(sources: list[str]) -> list[dict]:
     per-question lookup -- always scope to the relevant document(s)
     (known-bug #2)."""
     return database.get_headings_for_sources(sources)
+
+
+def _label_from_page1_chunks(chunks: list[tuple[dict, str]]) -> str:
+    """Pure: given a document's own page-1 (metadata, text) chunk pairs,
+    pick its real category label -- the first non-empty line of the
+    lowest-chunk_index text, skipping clearly-too-short noise lines.
+    Shared by get_document_type_label() and the batched
+    get_document_type_labels()."""
+    if not chunks:
+        return "Tidak diketahui"
+    ordered = sorted(chunks, key=lambda pair: pair[0].get("chunk_index", 0))
+    lines = [l.strip() for l in ordered[0][1].splitlines() if l.strip()]
+    if not lines:
+        return "Tidak diketahui"
+    # A cover page's very first OCR'd line is sometimes 1-2 characters of
+    # logo/glyph noise (confirmed live on a real scanned cover) rather than
+    # the real category text a couple of lines down -- skip clearly-too-
+    # short lines first, but still return something rather than nothing if
+    # every line on the page happens to be short.
+    for line in lines:
+        if len(line) >= 5:
+            return line
+    return lines[0]
 
 
 def get_document_type_label(source: str) -> str:
@@ -829,28 +987,43 @@ def get_document_type_label(source: str) -> str:
     whatever the document's own first line says, verbatim -- not
     classified into a fixed category set, since a hardcoded category enum
     would just be the same kind of corpus-specific guess in a different
-    form."""
+    form.
+
+    For more than a handful of sources, use get_document_type_labels()
+    instead -- calling this once per document does one Chroma query per
+    call, which doesn't scale (see that function's docstring)."""
     collection = get_collection()
     fetched = collection.get(
         where={"$and": [{"source": source}, {"page": 1}]}, include=["documents", "metadatas"]
     )
-    docs = fetched.get("documents", [])
-    metas = fetched.get("metadatas", [])
-    if not docs:
-        return "Tidak diketahui"
-    ordered = sorted(zip(metas, docs), key=lambda pair: pair[0].get("chunk_index", 0))
-    lines = [l.strip() for l in ordered[0][1].splitlines() if l.strip()]
-    if not lines:
-        return "Tidak diketahui"
-    # A cover page's very first OCR'd line is sometimes 1-2 characters of
-    # logo/glyph noise (confirmed live on a real scanned cover) rather than
-    # the real category text a couple of lines down -- skip clearly-too-
-    # short lines first, but still return something rather than nothing if
-    # every line on the page happens to be short.
-    for line in lines:
-        if len(line) >= 5:
-            return line
-    return lines[0]
+    chunks = list(zip(fetched.get("metadatas", []), fetched.get("documents", [])))
+    return _label_from_page1_chunks(chunks)
+
+
+def get_document_type_labels(sources: list[str]) -> dict[str, str]:
+    """Batched version of get_document_type_label() -- ONE Chroma query for
+    every document's page-1 chunks, grouped by source in Python, instead of
+    one query per document. Confirmed live: api.py's /documents listing
+    called the per-document version once per document (1177 documents in
+    this corpus), executed serially and NOT through run_on_chroma_thread
+    (the single-thread access pattern every other Chroma-touching endpoint
+    in this app uses) -- this alone made /documents take minutes, and
+    combined with concurrent access from other endpoints, could hang the
+    whole API server. Callers should still route this through
+    run_on_chroma_thread for the same reason every other Chroma access
+    does; batching alone fixes the O(n) query count, not the thread-safety
+    contract."""
+    if not sources:
+        return {}
+    collection = get_collection()
+    fetched = collection.get(
+        where={"$and": [{"source": {"$in": sources}}, {"page": 1}]},
+        include=["documents", "metadatas"],
+    )
+    by_source: dict[str, list[tuple[dict, str]]] = {}
+    for meta, doc in zip(fetched.get("metadatas", []), fetched.get("documents", [])):
+        by_source.setdefault(meta["source"], []).append((meta, doc))
+    return {source: _label_from_page1_chunks(by_source.get(source, [])) for source in sources}
 
 
 def get_full_document_text(source: str) -> str:
@@ -905,25 +1078,36 @@ def _category_candidates_from_headings(headings: list[dict]) -> set[str]:
     contract's isolated ayat marker line, e.g. "11.1") contribute nothing
     here, which is correct -- "Ayat" isn't a listable category the way
     "Pasal"/"Lampiran" are, it's a sub-item within one."""
+    # A single-letter lead ("B.", "C.", "E.") is this corpus's lettered
+    # sub-item marker (e.g. "E. SESUATU"), not a real category word --
+    # confirmed live it broke resolve_broad_category() below: its
+    # substring `.find()` matches a bare "e" inside "Sebutkan" at position
+    # 1, beating the real "lampiran"/"bab" candidate that appears later in
+    # the question, so the feature silently returned the wrong category
+    # for most real "list all X" questions. A real category word (bab,
+    # lampiran, pasal...) is always >=3 letters in this corpus.
     words = set()
     for h in headings:
         first = h["text"].strip().split()[0] if h["text"].strip() else ""
         first = re.sub(r"[^A-Za-z]", "", first).lower()
-        if first:
+        if len(first) >= 3:
             words.add(first)
     return words
 
 
 def resolve_broad_category(question: str, candidates: set[str]) -> Optional[str]:
     """Pick the category word by the order it appears in the question, not
-    unordered set iteration (known-bug #7)."""
+    unordered set iteration (known-bug #7). Word-boundary matching, not
+    substring -- confirmed live a bare "e" candidate matched inside
+    "Sebutkan" at position 1 with plain .find(), beating the real category
+    word that only appears later in the question."""
     lower = question.lower()
     best_pos = None
     best_word = None
     for word in candidates:
-        pos = lower.find(word)
-        if pos != -1 and (best_pos is None or pos < best_pos):
-            best_pos = pos
+        m = re.search(rf"\b{re.escape(word)}\b", lower)
+        if m and (best_pos is None or m.start() < best_pos):
+            best_pos = m.start()
             best_word = word
     return best_word
 

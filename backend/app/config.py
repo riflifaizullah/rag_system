@@ -128,9 +128,30 @@ RERANK_MODEL = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"  # ~470MB, multiling
 # real k=15: an off-topic "rendang recipe" question topped out at 0.574
 # (an unrelated HSSE risk-management document, not a real match) and still
 # slipped past 0.55. Recalibrated at the actual k=15 used in production:
-# off-topic top scores 0.36-0.57, genuine in-corpus questions 0.69-0.86 --
-# 0.62 sits cleanly in that gap with margin on both sides.
+# off-topic top scores 0.36-0.57.
+#
+# This alone isn't a clean separator, though: a broader real-question sample
+# found genuine, in-corpus questions as low as 0.51 (short/colloquial
+# phrasing embeds weakly) -- BELOW the off-topic ceiling. See
+# RELEVANCE_MIN_RERANK_SCORE below, which is what actually catches those.
 RELEVANCE_MIN_SCORE = 0.62
+
+# Second relevance signal, checked with OR against RELEVANCE_MIN_SCORE
+# (generation._passes_relevance_gate) -- confirmed live the raw score alone
+# misclassifies real questions with weak/colloquial phrasing (e.g. "cara
+# mengajukan cuti" scored 0.514, below the off-topic ceiling above). The
+# cross-encoder rerank score (already computed for free inside
+# retrieval.retrieve() when RERANK_ENABLED) separates the same two groups
+# far more cleanly: off-topic ceiling -0.63, genuine floor ~2.1 for
+# questions the corpus can actually answer well. 0.0 sits in that gap with
+# large margin on both sides.
+#
+# Known gap this does NOT fix: a question whose real answer document uses
+# different vocabulary than the question ("cuti" vs. the document's formal
+# "Istirahat Tahunan") can score low on BOTH signals -- that's a retrieval-
+# ranking/vocabulary problem, not a gating one, and needs query/synonym
+# expansion, not a threshold change.
+RELEVANCE_MIN_RERANK_SCORE = 0.0
 
 # Hybrid search: pure embedding similarity can rank a chunk containing the
 # exact WRONG Pasal number as more similar than the chunk with the right
@@ -156,6 +177,12 @@ RRF_K = 60  # standard RRF damping constant (Cormack et al.)
 # across all candidates; anything further behind is noise the reranker
 # already flagged, not real ambiguity. Provisional -- calibrated against
 # one real case, revisit if more real examples land closer to the gap.
+# retrieval.detect_ambiguity() (bare-identifier hard-block ambiguity) used
+# to reuse this same gap, but was switched to a structural heading-count
+# check instead -- score gap conflates "one document has richer retrievable
+# content" with "the identifier is unambiguous" (real eval case, 1k-corpus
+# scale: "Apa isi Lampiran 12?", 15+ documents share that heading but only
+# one had enough body text to score far ahead of the rest).
 MULTI_SOURCE_RERANK_GAP = 3.0
 
 # Full-document fallback: for "enumerate" or small-document "broad"
@@ -214,21 +241,16 @@ OCR_OSD_TIMEOUT_SECONDS = 15  # pytesseract.image_to_osd (a cheaper pre-pass)
 # confidence, rather than trusting either PSM unconditionally.
 OCR_FALLBACK_PSM = 6
 
-# Ambiguity detection: if the top-2 distinct-source retrieval scores are
-# within this gap, and no document was explicitly named, ask for clarification.
-AMBIGUITY_SCORE_GAP = 0.03
-
 # Multi-source discovery: when no document is named in the question, look
 # at how many DISTINCT documents actually compete for the top retrieval
 # slots -- not an absolute relevance-score cutoff (the cross-encoder's raw
 # scores aren't calibrated to a known "this counts as relevant" threshold),
 # just how many different documents show up among the best matches.
-# <= MULTI_SOURCE_MAX_FILES distinct sources -> answer each in full,
-# labeled by file. More than that -> too many to write out in full, so
-# return a short labeled candidate list instead and let the next message
-# (naming one of them) get the full answer, scoped to just that file.
+# One distinct source -> just answer it. More than one -> answer from the
+# highest-ranked source only, note how many other documents are also
+# relevant, and list up to MULTI_SOURCE_CANDIDATE_LIST_MAX of them as
+# candidates the UI can offer as a "narrow it down" choice.
 MULTI_SOURCE_CANDIDATE_K = 15
-MULTI_SOURCE_MAX_FILES = 3
 MULTI_SOURCE_CANDIDATE_LIST_MAX = 8
 
 # Heading detection / merging

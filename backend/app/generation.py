@@ -14,6 +14,16 @@ from app import config, database, retrieval
 
 REFUSAL_PHRASES = [
     # Indonesian
+    # Kept broad on purpose: a bare "tidak ditemukan" can false-positive on
+    # legitimate domain content (a real clinical "Tidak ditemukan kelainan
+    # medis" category). Narrowing the PHRASE itself broke more genuine
+    # refusals than it fixed (tried "tidak ditemukan dalam dokumen": 6/8
+    # real refusals phrase it differently) and a length cutoff also failed
+    # (a genuine long, helpful refusal was as long as the false positive).
+    # Real fix lives one level up, in looks_like_refusal(): a phrase match
+    # here is only a candidate: semantic similarity against the system's
+    # own actual refusal framing is what disambiguates content from a real
+    # refusal, since this list can't.
     "tidak ditemukan", "tidak tersedia", "tidak dapat menemukan",
     "maaf, saya tidak", "tidak ada informasi", "di luar cakupan",
     "tidak disebutkan dalam dokumen",
@@ -41,6 +51,11 @@ class Answer:
     text: str
     sources: list[str] = field(default_factory=list)
     log_id: Optional[int] = None
+    # Other documents that also looked relevant when none was named in the
+    # question -- the UI offers these as a "narrow it down" choice, same
+    # candidate-button mechanism ClarificationNeeded uses, but alongside a
+    # real answer instead of blocking on one (see generate_answer()).
+    candidates: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +146,15 @@ def call_ollama(
                 "model": config.OLLAMA_MODEL,
                 "prompt": prompt,
                 "stream": False,
+                # qwen3.5 is a reasoning model -- confirmed live it burns
+                # ~9000 chars / 2300+ tokens of hidden <thinking> content
+                # per call by default (78s), thrown away before the visible
+                # answer is even built. This RAG task is extraction/
+                # summarization over already-retrieved passages, not
+                # multi-step reasoning, so the hidden reasoning buys nothing
+                # here. Disabling it: same final answer text, 1.7s instead
+                # of 78s on the same question -- confirmed live, not assumed.
+                "think": False,
                 "options": {"num_ctx": config.OLLAMA_CONTEXT_TOKENS},
             },
             timeout=timeout or config.OLLAMA_TIMEOUT_SECONDS,
@@ -395,9 +419,40 @@ def is_followup_only(question: str) -> bool:
 # Refusal / hedging detection
 # ---------------------------------------------------------------------------
 
+_REFUSAL_TEMPLATES = [
+    "Informasi tersebut tidak ditemukan dalam dokumen yang tersedia.",
+    "Informasi mengenai hal tersebut tidak ditemukan dalam dokumen yang diberikan.",
+]
+_refusal_template_embeddings = None  # lazy -- avoid loading the embedder at import time
+_SEMANTIC_REFUSAL_THRESHOLD = 0.55
+
+
+def _looks_like_refusal_semantic(answer: str) -> bool:
+    global _refusal_template_embeddings
+    import numpy as np
+
+    embedder = retrieval.get_embedder()
+    if _refusal_template_embeddings is None:
+        _refusal_template_embeddings = embedder.encode(_REFUSAL_TEMPLATES, normalize_embeddings=True)
+    answer_emb = embedder.encode([answer[:200]], normalize_embeddings=True)[0]
+    return float(np.max(_refusal_template_embeddings @ answer_emb)) >= _SEMANTIC_REFUSAL_THRESHOLD
+
+
 def looks_like_refusal(answer: str) -> bool:
     lower = answer.lower()
-    return any(phrase in lower for phrase in REFUSAL_PHRASES)
+    if not any(phrase in lower for phrase in REFUSAL_PHRASES):
+        return False
+    # A refusal PHRASE appearing doesn't mean the answer IS a refusal --
+    # confirmed live real domain content can legitimately say "not found"
+    # in an unrelated sense (a real clinical "Tidak ditemukan kelainan
+    # medis" category, correctly answered in detail). Keyword narrowing
+    # and a length cutoff each traded one failure for worse ones (see
+    # REFUSAL_PHRASES comment); semantic similarity to the system's own
+    # actual refusal framing cleanly separated every real case tested
+    # (genuine refusals 0.68-0.73, real content 0.16-0.44). Only runs when
+    # a phrase already matched, so the common (no refusal language at all)
+    # path never pays the embedder cost.
+    return _looks_like_refusal_semantic(answer)
 
 
 def looks_like_hedging(answer: str) -> bool:
@@ -408,6 +463,22 @@ def looks_like_hedging(answer: str) -> bool:
 # ---------------------------------------------------------------------------
 # Single-question orchestration
 # ---------------------------------------------------------------------------
+
+def _passes_relevance_gate(hits: list[dict]) -> bool:
+    # OR, not AND: the two signals fail on different questions (see
+    # config.RELEVANCE_MIN_RERANK_SCORE), so clearing either one is real
+    # signal that a hit is relevant. A missing rerank_score (RERANK_ENABLED
+    # False) must fail closed, not fall back to the raw score -- that raw
+    # score is on a 0-1 scale, RELEVANCE_MIN_RERANK_SCORE is calibrated for
+    # the cross-encoder's unbounded logit scale, so a silent fallback would
+    # make the OR trivially true for almost any hit.
+    if not hits:
+        return False
+    max_raw = max(h["score"] for h in hits)
+    rerank_scores = [h["rerank_score"] for h in hits if "rerank_score" in h]
+    max_rerank = max(rerank_scores) if rerank_scores else float("-inf")
+    return max_raw >= config.RELEVANCE_MIN_SCORE or max_rerank >= config.RELEVANCE_MIN_RERANK_SCORE
+
 
 def generate_answer(
     question: str, session_id: Optional[str] = None, _forced_source: Optional[str] = None
@@ -430,18 +501,53 @@ def generate_answer(
     if not named_sources:
         wide_hits = retrieval.retrieve(question, source_filter=None, k=config.MULTI_SOURCE_CANDIDATE_K)
 
-        # Relevance gate on the RAW embedding score (not the reranked score
-        # used just below for "which document" -- rerank_score is a
-        # cross-encoder logit, a different, unbounded scale, so it can't
-        # share config.RELEVANCE_MIN_SCORE's calibration). This is the path
-        # a question with no named document takes -- confirmed live this is
+        # Bare generic-identifier questions ("Apa isi Pasal 8?") with no
+        # document named take a HARD clarification block here, never the
+        # soft guess-plus-alternates path below -- a clause/lampiran number
+        # is genuinely unanswerable without knowing whose numbering it is,
+        # unlike a general topic question where guessing the best-ranked
+        # document and offering alternates is still useful. Real bug fixed
+        # here (caught by code review): detect_ambiguity() was previously
+        # only ever called later in this function, in the branch that
+        # requires named_sources to be non-empty -- but detect_ambiguity()
+        # itself immediately returns None whenever named_sources IS set, so
+        # it was unreachable dead code and every bare-identifier question
+        # silently fell through to a guessed answer instead of asking which
+        # document was meant.
+        ambiguity = retrieval.detect_ambiguity(question, named_sources)
+        if ambiguity is not None:
+            message = (
+                "Pertanyaan Anda merujuk pada identifikasi yang ditemukan di beberapa dokumen: "
+                + ", ".join(ambiguity.candidates)
+                + ". Mohon sebutkan dokumen yang dimaksud."
+            )
+            log_id = database.log_answer(session_id, question, message, None, False, False, True, wide_hits)
+            return ClarificationNeeded(message=message, candidates=ambiguity.candidates, log_id=log_id)
+
+        # Relevance gate (see _passes_relevance_gate): this is the path a
+        # question with no named document takes -- confirmed live this is
         # where most off-topic questions were slipping through: vector
         # search always returns *some* top-k, several sources can end up
         # "competing" on the reranked score even when none are genuinely
         # relevant, and the ambiguity logic below only ever compares
         # candidates to each other, never asks whether any of them clear an
         # absolute floor at all.
-        if not wide_hits or max(h["score"] for h in wide_hits) < config.RELEVANCE_MIN_SCORE:
+        if not _passes_relevance_gate(wide_hits):
+            # A query-rewrite fallback was tried here (rephrase into formal
+            # register, retry retrieval) to rescue colloquial/short genuine
+            # questions ("cara mengajukan cuti" vs. the document's formal
+            # "Istirahat Tahunan") that fail both relevance signals.
+            # Reverted: confirmed live in the real 100-question eval that
+            # rewriting can inflate a genuinely off-topic question's scores
+            # too (formal-register text matches generic corpus boilerplate
+            # regardless of topic), and two different gating strategies for
+            # the retry (OR-based, then rerank-only) each fixed one false
+            # positive while breaking the original genuine rescue or another
+            # off-topic case -- no threshold on these two signals reliably
+            # separated a rewritten off-topic question from a rewritten
+            # genuine one. This vocabulary-mismatch class of question
+            # remains a known, deliberately unfixed gap: safer than
+            # reopening any off-topic false-positive risk.
             answer = "Maaf, informasi tersebut tidak ditemukan dalam dokumen yang tersedia."
             log_id = database.log_answer(session_id, question, answer, 0.0, False, True, False, [])
             return Answer(text=answer, sources=[], log_id=log_id)
@@ -486,31 +592,38 @@ def generate_answer(
         if len(ranked_sources) == 1:
             return generate_answer(question, session_id=session_id, _forced_source=ranked_sources[0][0])
 
-        if len(ranked_sources) <= config.MULTI_SOURCE_MAX_FILES:
-            blocks = []
-            all_sources = []
-            for src, _ in ranked_sources:
-                sub = generate_answer(question, session_id=session_id, _forced_source=src)
-                sub_text = sub.message if isinstance(sub, ClarificationNeeded) else sub.text
-                blocks.append(f"Berdasarkan {src}:\n{sub_text}")
-                all_sources.append(src)
-            combined = "\n\n".join(blocks)
-            combined += "\n\nJika Anda ingin fokus ke satu dokumen tertentu, sebutkan nama dokumennya."
-            return Answer(text=combined, sources=all_sources)
-
-        top = ranked_sources[: config.MULTI_SOURCE_CANDIDATE_LIST_MAX]
-        lines = []
-        for src, hit in top:
-            snippet = " ".join(hit["text"].split())[:100]
-            lines.append(f"- {src} -- \"{snippet}...\" (hal. {hit['page']})")
-        message = (
-            f"Ditemukan kecocokan di {len(ranked_sources)} dokumen -- terlalu banyak untuk ditampilkan "
-            f"lengkap sekaligus:\n" + "\n".join(lines) +
-            "\n\nSebutkan nama dokumen untuk jawaban lengkap."
+        # Multiple documents compete and none was named: answer once from
+        # the highest-ranked one (a forced source always resolves to a real
+        # Answer -- the bare-identifier ambiguity check above already
+        # caught the "genuinely can't guess" case -- and one LLM call beats
+        # generating a full answer per candidate), then note how many other
+        # documents also looked relevant and offer them as candidates. The
+        # UI shows the real answer immediately and the alternates as an
+        # optional, dismissible "narrow it down" choice, never a hard block.
+        top_src = ranked_sources[0][0]
+        top_answer = generate_answer(question, session_id=session_id, _forced_source=top_src)
+        alternates = ranked_sources[1 : config.MULTI_SOURCE_CANDIDATE_LIST_MAX + 1]
+        note = (
+            f"\n\nCatatan: pertanyaan ini juga cocok dengan {len(ranked_sources) - 1} dokumen lain yang "
+            f"mungkin relevan. Jawaban di atas diambil dari dokumen dengan kecocokan tertinggi "
+            f"({top_src}); pilih salah satu di bawah untuk fokus ke dokumen lain."
         )
-        candidates = [src for src, _ in top]
-        log_id = database.log_answer(session_id, question, message, None, False, False, True, wide_hits)
-        return ClarificationNeeded(message=message, candidates=candidates, log_id=log_id)
+        all_candidates = [top_src] + [src for src, _ in alternates]
+        combined_text = top_answer.text + note
+        # top_answer.log_id already points at an answer_log row written by
+        # the recursive call above, but with just the inner single-source
+        # text -- without this update the persisted row (and anything
+        # reading it: flagging, an eval re-run against logged answers)
+        # would silently disagree with what the user actually saw (caught
+        # in code review, not live).
+        if top_answer.log_id is not None:
+            database.update_answer_text(top_answer.log_id, combined_text, session_id)
+        return Answer(
+            text=combined_text,
+            sources=top_answer.sources,
+            log_id=top_answer.log_id,
+            candidates=all_candidates,
+        )
 
     # Enumerate-intent routing: a "list all X" / "apa saja X" / "berapa
     # banyak X" question must never go through similarity retrieval, which
@@ -585,27 +698,23 @@ def generate_answer(
             )
             return Answer(text=answer, sources=[named_sources[0]], log_id=log_id)
 
+    # No RELEVANCE_MIN_SCORE gate here (unlike the no-named-document path
+    # above): named_sources is always non-empty by this point (the empty
+    # case already returned above), so the user explicitly named this
+    # document -- there's no "nothing in the whole corpus is relevant"
+    # risk to guard against. Confirmed live: all 13 off-topic false-
+    # positives in the original 44%-refusal bug had NO named document; a
+    # gate added here anyway wrongly refused 12/60 (20%) of real named-
+    # document answerable questions at this path's real k=8, because a
+    # single filtered document's per-chunk cosine scores span a much wider
+    # range (0.42-1.0) than the whole-corpus noise floor this threshold
+    # was calibrated against.
+    # detect_ambiguity() itself only ever fires when named_sources is EMPTY
+    # (see its own docstring/guard in retrieval.py) -- calling it here, where
+    # named_sources is always non-empty by this point, always returned None.
+    # Moved to the actual no-named-document branch above, where it can fire.
     source_filter = named_sources or None
     hits = retrieval.retrieve(question, source_filter=source_filter, k=config.TOP_K)
-
-    # Relevance gate: a question genuinely unrelated to this corpus still
-    # gets a top-k back from vector search (it always returns *something*),
-    # so a missing gate here is what let off-topic questions reach the LLM
-    # and get answered from its own general knowledge instead of refused --
-    # see config.RELEVANCE_MIN_SCORE for the real data this threshold is
-    # calibrated against.
-    if hits and max(h["score"] for h in hits) < config.RELEVANCE_MIN_SCORE:
-        hits = []
-
-    ambiguity = retrieval.detect_ambiguity(question, hits, named_sources)
-    if ambiguity is not None:
-        message = (
-            "Pertanyaan Anda merujuk pada identifikasi yang ditemukan di beberapa dokumen: "
-            + ", ".join(ambiguity.candidates)
-            + ". Mohon sebutkan dokumen yang dimaksud."
-        )
-        log_id = database.log_answer(session_id, question, message, None, False, False, True, hits)
-        return ClarificationNeeded(message=message, candidates=ambiguity.candidates, log_id=log_id)
 
     if not hits:
         answer = "Maaf, informasi tersebut tidak ditemukan dalam dokumen yang tersedia."
@@ -709,14 +818,19 @@ def generate_multi_answer(text: str, session_id: Optional[str] = None) -> list[d
                 }
             )
         else:
+            # looks_like_refusal() now pays a real embedder call on a
+            # keyword-phrase match (see its own docstring) -- computing it
+            # once instead of twice here avoids doubling that cost on every
+            # refusal-shaped answer.
+            refused = looks_like_refusal(result.text)
             results.append(
                 {
                     "question": q,
                     "answer": result.text,
-                    "answered": not looks_like_refusal(result.text),
-                    "refused": looks_like_refusal(result.text),
+                    "answered": not refused,
+                    "refused": refused,
                     "needs_clarification": False,
-                    "candidate_documents": [],
+                    "candidate_documents": result.candidates,
                     "sources": result.sources,
                     "log_id": result.log_id,
                 }

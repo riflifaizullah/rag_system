@@ -44,7 +44,9 @@ def init_db() -> None:
                 source TEXT PRIMARY KEY,
                 content_hash TEXT NOT NULL,
                 indexed_at TEXT NOT NULL,
-                file_fingerprint TEXT
+                file_fingerprint TEXT,
+                page_count INTEGER,
+                size_kb REAL
             );
 
             CREATE TABLE IF NOT EXISTS headings (
@@ -91,6 +93,12 @@ def init_db() -> None:
                 min_groundedness REAL,
                 sentence_groundedness TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS vlm_cache (
+                image_hash TEXT PRIMARY KEY,
+                description TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
             """
         )
         # migration for DBs created before the OCR-confidence/token columns existed
@@ -112,6 +120,10 @@ def init_db() -> None:
         existing_doc_cols = {row["name"] for row in conn.execute("PRAGMA table_info(documents)").fetchall()}
         if "file_fingerprint" not in existing_doc_cols:
             conn.execute("ALTER TABLE documents ADD COLUMN file_fingerprint TEXT")
+        if "page_count" not in existing_doc_cols:
+            conn.execute("ALTER TABLE documents ADD COLUMN page_count INTEGER")
+        if "size_kb" not in existing_doc_cols:
+            conn.execute("ALTER TABLE documents ADD COLUMN size_kb REAL")
 
 
 # ---------------------------------------------------------------------------
@@ -140,18 +152,26 @@ def get_document_fingerprint(source: str) -> Optional[str]:
         return row["file_fingerprint"] if row else None
 
 
-def upsert_document(source: str, content_hash: str, file_fingerprint: Optional[str] = None) -> None:
+def upsert_document(
+    source: str,
+    content_hash: str,
+    file_fingerprint: Optional[str] = None,
+    page_count: Optional[int] = None,
+    size_kb: Optional[float] = None,
+) -> None:
     with get_conn() as conn:
         conn.execute(
             """
-            INSERT INTO documents (source, content_hash, indexed_at, file_fingerprint)
-            VALUES (?, ?, datetime('now'), ?)
+            INSERT INTO documents (source, content_hash, indexed_at, file_fingerprint, page_count, size_kb)
+            VALUES (?, ?, datetime('now'), ?, ?, ?)
             ON CONFLICT(source) DO UPDATE SET
                 content_hash = excluded.content_hash,
                 indexed_at = excluded.indexed_at,
-                file_fingerprint = excluded.file_fingerprint
+                file_fingerprint = excluded.file_fingerprint,
+                page_count = excluded.page_count,
+                size_kb = excluded.size_kb
             """,
-            (source, content_hash, file_fingerprint),
+            (source, content_hash, file_fingerprint, page_count, size_kb),
         )
 
 
@@ -159,6 +179,61 @@ def delete_document(source: str) -> None:
     with get_conn() as conn:
         conn.execute("DELETE FROM documents WHERE source = ?", (source,))
         conn.execute("DELETE FROM headings WHERE source = ?", (source,))
+
+
+def get_document_metadata(sources: list[str]) -> dict[str, tuple[Optional[int], Optional[float]]]:
+    """Bulk (page_count, size_kb) lookup for /documents -- avoids opening
+    every PDF with pdfplumber on every request (confirmed live: doing that
+    for 1177 files took 40+ seconds, past the UI's fetch timeout, which is
+    why the sidebar showed 0 documents). Missing/never-backfilled sources
+    are simply absent from the returned dict."""
+    if not sources:
+        return {}
+    with get_conn() as conn:
+        placeholders = ",".join("?" * len(sources))
+        rows = conn.execute(
+            f"SELECT source, page_count, size_kb FROM documents WHERE source IN ({placeholders})",
+            sources,
+        ).fetchall()
+    return {r["source"]: (r["page_count"], r["size_kb"]) for r in rows if r["page_count"] is not None}
+
+
+def set_document_metadata(source: str, page_count: int, size_kb: float) -> None:
+    """Backfill path for documents indexed before page_count/size_kb existed
+    -- see get_document_metadata()."""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE documents SET page_count = ?, size_kb = ? WHERE source = ?",
+            (page_count, size_kb, source),
+        )
+
+
+def get_vlm_description(image_hash: str) -> Optional[str]:
+    """The VLM's own sampling isn't fully deterministic even at
+    temperature=0 (confirmed live -- likely GPU floating-point execution
+    order, not fixable at the request level), so re-ingesting an unchanged
+    file could get a different diagram description and therefore a
+    different chunk count each time. The same rendered page image always
+    hashes the same, though -- caching by that hash makes RE-ingestion of
+    unchanged content deterministic without needing the model itself to
+    be reproducible."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT description FROM vlm_cache WHERE image_hash = ?", (image_hash,)
+        ).fetchone()
+        return row["description"] if row else None
+
+
+def set_vlm_description(image_hash: str, description: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO vlm_cache (image_hash, description, created_at)
+            VALUES (?, ?, datetime('now'))
+            ON CONFLICT(image_hash) DO UPDATE SET description = excluded.description
+            """,
+            (image_hash, description),
+        )
 
 
 def list_document_sources() -> list[str]:
@@ -357,6 +432,22 @@ def log_answer(
     if session_id:
         _write_session_log_file(session_id)
     return row_id
+
+
+def update_answer_text(log_id: int, answer: str, session_id: Optional[str] = None) -> None:
+    """Overwrite an already-logged answer's text in place -- for the one
+    case where the text a user actually sees is finalized AFTER the row
+    was written (generation.py's competing-documents branch logs the inner,
+    single-source answer first via its own recursive log_answer() call,
+    then appends a "other documents also matched" note and candidate list
+    on top of it). Without this, the persisted answer_log row -- and
+    therefore flagging and any eval reading it -- would silently see
+    different text than what the UI actually rendered (caught in code
+    review, not live)."""
+    with get_conn() as conn:
+        conn.execute("UPDATE answer_log SET answer = ? WHERE id = ?", (answer, log_id))
+    if session_id:
+        _write_session_log_file(session_id)
 
 
 def _write_session_log_file(session_id: str) -> None:

@@ -447,9 +447,14 @@ def _ocr_page(pdf_path: Path, page_num: int) -> tuple[str, Optional[float]]:
                 text, avg_confidence = alt_text, alt_confidence
 
         return text, avg_confidence
-    except Exception:
-        # OCR backends (poppler/tesseract) may not be installed on this
-        # laptop; degrade gracefully rather than failing ingestion.
+    except Exception as exc:
+        # _OCR_AVAILABLE already covers "backend not installed at all" (see
+        # the import guard above) -- reaching here means OCR IS available
+        # but failed on this specific page for some other reason. Silently
+        # returning empty text made a real per-page OCR failure
+        # indistinguishable from "nothing to OCR"; logging it doesn't change
+        # the graceful-degradation behavior (ingestion still proceeds).
+        print(f"WARNING: OCR failed on {pdf_path.name} page {page_num}: {exc!r}")
         return "", None
 
 
@@ -501,27 +506,54 @@ def _describe_page_image(pdf_path: Path, page_num: int) -> Optional[str]:
         if not images:
             return None
         oriented = _correct_orientation(images[0])
-    except Exception:
+    except Exception as exc:
+        print(f"WARNING: rendering {pdf_path.name} page {page_num} for VLM failed: {exc!r}")
         return None
     return _describe_image_with_vlm(oriented)
 
 
+_VLM_PROMPT = (
+    "Describe this diagram or image in detail. List every "
+    "visible label or text exactly as written, then describe "
+    "the shapes and how they connect (arrows, lines, flow "
+    "direction, groupings). Respond in the same language as "
+    "the labels in the image."
+)
+
+
+def _image_content_hash(png_bytes: bytes, cache_context: str = "") -> str:
+    # cache_context (prompt + model) folded in so changing either naturally
+    # invalidates old cache entries -- confirmed live (independent code
+    # review) that hashing image bytes alone would silently keep serving a
+    # stale description forever after a future prompt/model change, with no
+    # signal anything was wrong and no documented way to invalidate it.
+    return hashlib.sha256(png_bytes + cache_context.encode("utf-8")).hexdigest()
+
+
 def _describe_image_with_vlm(image: "Image.Image", _retried: bool = False) -> Optional[str]:
+    # Confirmed live: this call's sampling isn't fully deterministic even at
+    # temperature=0 (likely GPU floating-point execution order, not fixable
+    # at the request level -- see config.py's temperature=0 comment), so
+    # re-ingesting an unchanged file could get a different description and
+    # therefore a different chunk count each time. The same rendered page
+    # always hashes the same, though -- caching by that hash makes
+    # re-ingestion of unchanged content deterministic without needing the
+    # model itself to be reproducible.
     buf = io.BytesIO()
     image.save(buf, format="PNG")
-    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+    png_bytes = buf.getvalue()
+    image_hash = _image_content_hash(png_bytes, f"{_VLM_PROMPT}|{config.VLM_MODEL}")
+    cached = database.get_vlm_description(image_hash)
+    if cached is not None:
+        return cached
+
+    b64 = base64.b64encode(png_bytes).decode("ascii")
     try:
         resp = requests.post(
             f"{config.OLLAMA_HOST}/api/generate",
             json={
                 "model": config.VLM_MODEL,
-                "prompt": (
-                    "Describe this diagram or image in detail. List every "
-                    "visible label or text exactly as written, then describe "
-                    "the shapes and how they connect (arrows, lines, flow "
-                    "direction, groupings). Respond in the same language as "
-                    "the labels in the image."
-                ),
+                "prompt": _VLM_PROMPT,
                 "images": [b64],
                 "stream": False,
                 # Confirmed live: Ollama's default num_ctx (4096) for this
@@ -531,7 +563,21 @@ def _describe_image_with_vlm(image: "Image.Image", _retried: bool = False) -> Op
                 # (done_reason "length", not an error). Raising it to 8192
                 # let the same call finish naturally (done_reason "stop")
                 # with a full multi-paragraph description.
-                "options": {"num_ctx": config.VLM_CONTEXT_TOKENS},
+                #
+                # temperature=0: this is a literal-extraction task ("list
+                # every visible label exactly as written"), not creative
+                # generation, so lower temperature is the right fit for
+                # accuracy regardless. NOT a determinism fix, though --
+                # confirmed live (20-file re-ingest stress test found 6/20
+                # files got a different chunk count re-ingesting unchanged
+                # content) that outputs still differ run-to-run even with
+                # temperature=0 AND a fixed seed both set -- most likely
+                # non-deterministic floating-point execution order on the
+                # GPU, which no request-level option controls. Re-ingesting
+                # the same file can still shift its exact chunk count
+                # slightly; that's an accepted characteristic of this local
+                # VLM setup, not something believed fixable here.
+                "options": {"num_ctx": config.VLM_CONTEXT_TOKENS, "temperature": 0},
             },
             timeout=config.VLM_TIMEOUT_SECONDS,
         )
@@ -544,9 +590,17 @@ def _describe_image_with_vlm(image: "Image.Image", _retried: bool = False) -> Op
         if _retried:
             return None
         return _describe_image_with_vlm(image, _retried=True)
-    except Exception:
+    except Exception as exc:
+        # Silently returning None made a real VLM failure (network error,
+        # malformed response) indistinguishable from "nothing to describe" --
+        # logging it doesn't change the graceful-degradation behavior
+        # (ingestion still proceeds without the diagram description).
+        print(f"WARNING: VLM description failed: {exc!r}")
         return None
-    return resp.json().get("response", "").strip() or None
+    description = resp.json().get("response", "").strip() or None
+    if description:
+        database.set_vlm_description(image_hash, description)
+    return description
 
 
 _CID_ARTIFACT_RE = re.compile(r"\(cid:\d+\)")
@@ -1093,6 +1147,7 @@ def extract_ingest_data(pdf_path: Path) -> dict:
         "headings": headings,
         "all_chunks": all_chunks,
         "ocr_confidence_by_page": ocr_confidence_by_page,
+        "page_count": len(pages),
     }
 
 
@@ -1146,8 +1201,16 @@ def write_ingest_data(pdf_path: Path, data: dict, collection, embedder) -> int:
     # remove any previously-indexed chunks for this source before re-adding
     try:
         collection.delete(where={"source": source})
-    except Exception:
-        pass
+    except Exception as exc:
+        # A silently swallowed failure here used to mean: if delete fails
+        # for a real reason (lock, corruption), collection.add() below still
+        # runs, leaving this source's STALE old chunks and fresh new chunks
+        # both indexed together -- a real retrieval-quality risk with zero
+        # visibility it ever happened. Not changing the fallback behavior
+        # itself here (no verified evidence of why it was originally lenient
+        # -- possibly a harmless "nothing to delete yet" case on first-ever
+        # ingest of a new source), but a failure is no longer invisible.
+        print(f"WARNING: collection.delete failed for source={source!r}: {exc!r}")
 
     if all_chunks:
         texts = [c["text"] for c in all_chunks]
@@ -1170,7 +1233,10 @@ def write_ingest_data(pdf_path: Path, data: dict, collection, embedder) -> int:
     else:
         remove_chunk_log(source)
 
-    database.upsert_document(source, content_hash(pdf_path), file_fingerprint(pdf_path))
+    size_kb = round(pdf_path.stat().st_size / 1024, 1)
+    database.upsert_document(
+        source, content_hash(pdf_path), file_fingerprint(pdf_path), data["page_count"], size_kb
+    )
     return len(all_chunks)
 
 
@@ -1182,7 +1248,12 @@ def ingest_file(pdf_path: Path, collection, embedder) -> int:
 def remove_file(source: str, collection) -> None:
     try:
         collection.delete(where={"source": source})
-    except Exception:
-        pass
+    except Exception as exc:
+        # Same risk as write_ingest_data's delete, mirrored: database.
+        # delete_document() below still runs regardless, so a silently
+        # failed collection.delete() means sqlite says this source is gone
+        # while its chunks remain live and queryable in the vector store
+        # indefinitely, with zero visibility it happened.
+        print(f"WARNING: collection.delete failed for source={source!r}: {exc!r}")
     remove_chunk_log(source)
     database.delete_document(source)

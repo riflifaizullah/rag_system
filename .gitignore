@@ -11,9 +11,15 @@ data/
 claude_session_archive/
 
 # Same reason: rendered page images and extracted text from real corpus
-# files used by testing/ scripts -- the scripts themselves are code and stay
-# tracked, but their output is real internal document content.
+# files used by testing/ scripts.
 result/
+
+# Same reason, caught later: these scripts hardcode real internal document
+# filenames and descriptions as literal strings (e.g. signed contracts,
+# a named employee's COVID-test letter) to pick a varied sample to test
+# against -- the code logic is fine to share, but the filenames/comments
+# are themselves real document content, not just code.
+backend/testing/
 
 # Python
 __pycache__/
@@ -28,3 +34,24 @@ Thumbs.db
 
 # Claude Code's own local tooling state, not project code
 .claude/
+
+# graphify's generated knowledge graph + extraction cache -- fully
+# regenerable with `/graphify --update`, same reasoning as .NET's bin/obj
+# below: a build artifact, not a source file.
+graphify-out/
+
+# .NET build output -- regenerate with `dotnet build`, never hand-edited.
+**/bin/
+**/obj/
+
+# Visual Studio / Rider per-user workspace state, not project config.
+.vs/
+*.user
+*.suo
+
+# Stray console redirects from `dotnet run > ...log` landing in the project
+# folder instead of a scratch dir -- not project output, safe to delete.
+dotnet/RagSystemWeb/*.log
+
+# Internal running log / handoff scratchpad, not meant for the shared repo.
+NOTES.md

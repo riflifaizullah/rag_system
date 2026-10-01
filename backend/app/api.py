@@ -104,15 +104,6 @@ def sources():
     return {"sources": retrieval.list_indexed_sources()}
 
 
-def _infer_doc_type(filename: str) -> str:
-    """Reads the document's own real category label from its content
-    (see retrieval.get_document_type_label) instead of guessing from the
-    filename -- the old version called anything not literally starting
-    with "kontrak" a "sop", which was wrong for every TKO/TKI/TKPA/Pedoman/
-    letter/contract/technical-doc actually in this corpus."""
-    return retrieval.get_document_type_label(filename)
-
-
 def _validated_path(filename: str):
     """Filename must be one of the actually-indexed sources -- never a raw
     path lookup, to avoid path traversal onto arbitrary local files."""
@@ -126,18 +117,37 @@ def _validated_path(filename: str):
 
 @app.get("/documents")
 def documents():
+    sources = retrieval.list_indexed_sources()
+    # One batched Chroma query for every document's type label, routed
+    # through the single Chroma-access thread -- confirmed live the old
+    # per-document retrieval.get_document_type_label() call, once per
+    # document (1177 in this corpus) and NOT thread-routed, made this
+    # endpoint take minutes and could hang the whole server under
+    # concurrent load. See get_document_type_labels()'s own docstring.
+    labels = retrieval.run_on_chroma_thread(retrieval.get_document_type_labels, sources)
+    # page_count/size_kb are cached in sqlite at ingest time (see
+    # ingestion.write_ingest_data) -- confirmed live that opening every PDF
+    # with pdfplumber on every request (the old behavior) took 40+ seconds
+    # for 1177 files, past the UI's fetch timeout, which is why the sidebar
+    # showed 0 documents. Sources ingested before this cache existed fall
+    # back to opening just that one file and backfill the cache for next time.
+    cached_meta = database.get_document_metadata(sources)
     results = []
-    for source in retrieval.list_indexed_sources():
+    for source in sources:
         path = config.CORPUS_DIR / source
         if not path.is_file():
             continue
-        with pdfplumber.open(str(path)) as pdf:
-            page_count = len(pdf.pages)
-        size_kb = round(path.stat().st_size / 1024, 1)
+        if source in cached_meta:
+            page_count, size_kb = cached_meta[source]
+        else:
+            with pdfplumber.open(str(path)) as pdf:
+                page_count = len(pdf.pages)
+            size_kb = round(path.stat().st_size / 1024, 1)
+            database.set_document_metadata(source, page_count, size_kb)
         results.append(
             {
                 "filename": source,
-                "type": _infer_doc_type(source),
+                "type": labels.get(source, "Tidak diketahui"),
                 "page_count": page_count,
                 "size_kb": size_kb,
             }
@@ -207,7 +217,12 @@ def document_chunks(filename: str):
 @app.get("/documents/{filename}/download")
 def document_download(filename: str):
     path = _validated_path(filename)
-    return FileResponse(path=str(path), filename=filename, media_type="application/pdf")
+    return FileResponse(
+        path=str(path),
+        filename=filename,
+        media_type="application/pdf",
+        content_disposition_type="inline",
+    )
 
 
 @app.post("/flag/{log_id}")

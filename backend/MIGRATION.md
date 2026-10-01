@@ -87,8 +87,11 @@
    For ~1000 real files this will take a long time, especially any scanned
    pages -- don't expect the few-minute turnaround this session's 20-file
    corpus had.
-7. Run it: `uvicorn app.api:app --host 0.0.0.0 --port 8000` and
-   `streamlit run streamlit_app.py`.
+7. Run it: `uvicorn app.api:app --host 0.0.0.0 --port 8000` from inside
+   `backend/`, and `streamlit run streamlit_app.py` from inside
+   `../frontend-streamlit/` (paths current as of the repo's backend/
+   frontend-streamlit split -- see `../docs/ARCHITECTURE.md` if this ever
+   moves again).
 
 (Optional, quality-of-life, not blocking) On the old laptop a PowerShell
 profile script auto-activated `.venv` when opening a terminal in this
