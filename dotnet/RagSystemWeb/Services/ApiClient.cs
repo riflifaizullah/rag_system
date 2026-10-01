@@ -11,7 +11,7 @@ namespace RagSystemWeb.Services;
 /// (dotnet/RagSystemDesktop/Services/ApiClient.cs) -- this logic doesn't
 /// care whether the UI is WPF or Blazor.
 /// </summary>
-public sealed class ApiClient
+public sealed class ApiClient : IApiClient
 {
     // Shared with PreviewPanel.razor so the <iframe>/download link don't
     // duplicate this literal.

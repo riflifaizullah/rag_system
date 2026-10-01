@@ -6,6 +6,11 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddRazorPages();
 builder.Services.AddServerSideBlazor();
 builder.Services.AddSingleton<ApiClient>();
+// ChatState depends on IApiClient (not the concrete ApiClient) so tests can
+// supply a fake -- same singleton instance either way, Sidebar/PreviewPanel
+// still inject the concrete ApiClient directly for the methods/const not on
+// the interface.
+builder.Services.AddSingleton<IApiClient>(sp => sp.GetRequiredService<ApiClient>());
 // Scoped, not singleton: each Blazor circuit (one per open browser tab) needs
 // its own chat session/messages, not one shared across every visitor.
 builder.Services.AddScoped<ChatState>();

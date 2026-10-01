@@ -13,8 +13,16 @@ namespace RagSystemWeb.State;
 /// </summary>
 public sealed class ChatState
 {
-    private readonly ApiClient _api;
+    private readonly IApiClient _api;
     private string? _sessionId;
+
+    // Bumped on every SelectSessionAsync call -- found in code review: two
+    // session clicks in quick succession (session A, then B before A's
+    // GetHistoryAsync resolves) could race, with A's late-arriving history
+    // clobbering B's just-cleared Messages. Whichever call's token no
+    // longer matches when its await returns was superseded and discards
+    // its own result instead of applying it.
+    private int _sessionSwitchToken;
 
     // The question that produced the current candidate list -- needed to
     // compose "{question} untuk dokumen {filename}" when a candidate is
@@ -28,8 +36,30 @@ public sealed class ChatState
     public List<string> CandidateDocuments { get; } = [];
 
     public string InputText { get; set; } = "";
-    public bool IsBusy { get; private set; }
+
+    private bool _isBusy;
+    public bool IsBusy
+    {
+        get => _isBusy;
+        private set
+        {
+            if (_isBusy == value) return;
+            _isBusy = value;
+            BusyChanged?.Invoke();
+        }
+    }
+
     public bool ShowCandidateBar { get; private set; }
+
+    // Separate from Changed (code review, defense in depth): Sidebar needs
+    // to disable session rows for the whole duration of an in-flight ask
+    // (which can run minutes on the full-document-fallback path) so a
+    // session switch is never reachable mid-answer, not just rejected
+    // silently by SelectSessionAsync's own IsBusy guard. Deliberately NOT
+    // folded into Changed -- that event also triggers a GET /sessions
+    // refetch, which IsBusy flips on every single message, not just the
+    // first; this fires a plain re-render with no network call instead.
+    public event Action? BusyChanged;
 
     // True whenever there's nothing to lose by starting a fresh chat --
     // either no backend session exists yet for the current chat, or one
@@ -44,7 +74,7 @@ public sealed class ChatState
     // there's no property-changed system otherwise (see the class comment).
     public event Action? Changed;
 
-    public ChatState(ApiClient api)
+    public ChatState(IApiClient api)
     {
         _api = api;
     }
@@ -71,15 +101,29 @@ public sealed class ChatState
     // Riwayat row only updated Index's SelectedSessionId for highlighting,
     // it never actually loaded history or redirected Ask, so every message
     // silently went to whatever session InitializeAsync() had created.
-    public async Task SelectSessionAsync(string sessionId)
+    //
+    // Returns whether the switch actually applied, so Index.razor only
+    // commits its own highlighted-session state on success (code review
+    // finding: it used to commit unconditionally, so clicking a session row
+    // while IsBusy -- this silently no-ops below -- left the sidebar
+    // highlighting a session ChatColumn wasn't actually showing).
+    public async Task<bool> SelectSessionAsync(string sessionId)
     {
-        if (IsBusy) return;
-        _sessionId = sessionId;
+        if (IsBusy) return false;
+        var requestId = ++_sessionSwitchToken;
         _questionAwaitingCandidate = null;
         DismissCandidates();
-        Messages.Clear();
 
         var history = await _api.GetHistoryAsync(sessionId);
+
+        // Stale-response guard: a second SelectSessionAsync call (a fast
+        // second click) can start and finish while this one was still
+        // awaiting history -- discard this call's result instead of
+        // clobbering whatever the newer call already applied.
+        if (requestId != _sessionSwitchToken) return false;
+
+        _sessionId = sessionId;
+        Messages.Clear();
         foreach (var message in history)
         {
             Messages.Add(new ChatMessageState { Role = message.Role, Text = message.Content });
@@ -90,6 +134,7 @@ public sealed class ChatState
         // driven directly by the SelectedSessionId parameter. ChatColumn's
         // own redraw comes from Index.razor's StateHasChanged() after this
         // call returns, same as before ChatColumn subscribed to Changed.
+        return true;
     }
 
     public bool CanSend => !IsBusy && !string.IsNullOrWhiteSpace(InputText);

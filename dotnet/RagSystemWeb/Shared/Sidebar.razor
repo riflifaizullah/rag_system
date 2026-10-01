@@ -76,7 +76,13 @@
             {
                 @foreach (var session in FilteredSessions)
                 {
+                    @* Disabled while Chat.IsBusy (code review, defense in depth):
+                       SelectSessionAsync already no-ops in this state, but a
+                       disabled row also stops the click from looking like it
+                       did something, and stops two overlapping session
+                       switches from ever being reachable from the UI. *@
                     <button class="stk-session-row @(session.SessionId == SelectedSessionId ? "active" : "")"
+                            disabled="@Chat.IsBusy"
                             @onclick="() => SelectSession(session.SessionId)">
                         <div style="width: 6px; height: 6px; border-radius: 50%; background: @(session.SessionId == SelectedSessionId ? "var(--accent)" : "transparent"); flex-shrink: 0;"></div>
                         <div style="min-width: 0;">
@@ -149,7 +155,11 @@
     // session's title (computed fresh server-side from its first message,
     // so it flips from "(sesi kosong)" to the real topic the moment one
     // exists) all stay current without a manual refresh.
-    protected override void OnInitialized() => Chat.Changed += OnChatChanged;
+    protected override void OnInitialized()
+    {
+        Chat.Changed += OnChatChanged;
+        Chat.BusyChanged += OnBusyChanged;
+    }
 
     private void OnChatChanged() => InvokeAsync(async () =>
     {
@@ -157,7 +167,16 @@
         StateHasChanged();
     });
 
-    public void Dispose() => Chat.Changed -= OnChatChanged;
+    // Just a redraw, no refetch -- see ChatState.BusyChanged's comment for
+    // why this is kept separate from Changed. Keeps session rows' disabled
+    // state (below) current for the whole duration of an in-flight ask.
+    private void OnBusyChanged() => InvokeAsync(StateHasChanged);
+
+    public void Dispose()
+    {
+        Chat.Changed -= OnChatChanged;
+        Chat.BusyChanged -= OnBusyChanged;
+    }
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {

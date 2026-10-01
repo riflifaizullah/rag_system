@@ -21,7 +21,7 @@ can be developed and run on its own:
 - **Running this:** [`DEPLOYMENT.md`](DEPLOYMENT.md) — prerequisites, the gitignored corpus/index data you need separately, a machine-specific path to check, and real gotchas hit while building this (including a Windows-specific one).
 - **How the system is built, module by module, with diagrams:** [`ARCHITECTURE.md`](ARCHITECTURE.md).
 - **Evaluation results, every kind of testing in this project, ingestion stats, bugs found/fixed:** [`EVALUATION_RESULTS.md`](EVALUATION_RESULTS.md).
-- **Current project state, tech stack, and mockup notes:** `NOTES.md` — kept local only (gitignored), ask the repo owner if you need it.
+- **Current project state and mockup notes** (tech stack is already covered above, in `ARCHITECTURE.md`/`DEPLOYMENT.md`): `NOTES.md` — kept local only (gitignored), ask the repo owner if you need it.
 
 ## Directory structure
 
@@ -66,6 +66,7 @@ This is only what's actually in the repo. Several folders exist locally but are 
 | **Watch the backend's own status page in a browser** | `http://localhost:8000/monitor` |
 | **Trigger a corpus resync** (new/changed/deleted files) | `curl -X POST http://localhost:8000/sync` |
 | **Run backend unit tests** | `cd backend` then `python -m pytest app/test_units.py -v` |
+| **Run website unit tests** | `cd dotnet/RagSystemWeb.Tests` then `dotnet test` |
 | **Rebuild the index from scratch** | `cd backend` then `python -m app.sync_documents` |
 
 See [`DEPLOYMENT.md`](DEPLOYMENT.md) for prerequisites these commands assume (Ollama running, Python env, .NET SDK) and known gotchas.
